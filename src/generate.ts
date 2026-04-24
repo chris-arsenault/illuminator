@@ -1,9 +1,9 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { BflClient } from "./bfl-client.js";
 import { ClaudeFormatter } from "./claude-formatter.js";
-import { getPreset } from "./preset-registry.js";
-import { parseSpec } from "./parse-spec.js";
+import { loadPack } from "./parse-pack.js";
+import { buildRawPngMetadata, embedPngMetadata } from "./png-metadata.js";
 import {
   MAX_CONCURRENCY,
   parseBoundedIntegerFlag,
@@ -15,8 +15,8 @@ import type {
 } from "./types.js";
 
 export interface GenerateOptions {
-  /** Absolute path to the spec markdown file. */
-  specPath: string;
+  /** Absolute path to pack.toml or a directory containing it. */
+  packPath: string;
   /** Absolute path to the raw output directory. */
   outDir: string;
   /** Filter to this section name (case-insensitive substring match). */
@@ -27,7 +27,7 @@ export interface GenerateOptions {
   dryRun?: boolean;
   /** Only print formatted Claude outputs; no BFL calls, no disk writes. */
   previewOnly?: boolean;
-  /** Override the model from the spec settings. */
+  /** Override the model from the pack settings. */
   modelOverride?: string;
   /** Number of assets to process in parallel. */
   concurrency?: number;
@@ -35,7 +35,7 @@ export interface GenerateOptions {
   anthropicApiKey: string;
   /** BFL API key. */
   bflApiKey: string;
-  /** Progress callback — invoked after each spec completes or fails. */
+  /** Progress callback — invoked after each asset completes or fails. */
   onProgress?: (event: ProgressEvent) => void;
 }
 
@@ -75,9 +75,7 @@ export interface GenerateSummary {
 export async function generate(
   opts: GenerateOptions,
 ): Promise<GenerateSummary> {
-  const source = await readFile(opts.specPath, "utf8");
-  const doc = parseSpec(source);
-  const preset = getPreset(doc.settings.preset);
+  const doc = await loadPack(opts.packPath);
   const model = opts.modelOverride ?? doc.settings.model;
 
   const filtered = filterSpecs(doc.specs, opts.section, opts.limit);
@@ -94,13 +92,9 @@ export async function generate(
   const previewOutputs = new Array<string | undefined>(filtered.length);
   const batchStart = Date.now();
 
-  // Claude formatter + BFL client are reused across all specs so prompt
-  // caching on the Claude system prompt can kick in from the second call.
-  const formatter = new ClaudeFormatter({
-    apiKey: opts.anthropicApiKey,
-    style: preset.style,
-    palette: preset.palette,
-  });
+  // Claude formatter instances are cached per style/palette pair so prompt
+  // caching can still kick in when assets share the same resolved context.
+  const formatterCache = new Map<string, ClaudeFormatter>();
   const bfl = new BflClient({
     apiKey: opts.bflApiKey,
     model,
@@ -110,9 +104,11 @@ export async function generate(
   const processOne = async (spec: AssetSpec, index: number): Promise<void> => {
     try {
       if (opts.dryRun) {
-        // No API calls at all — just confirm the spec parses and is valid.
+        // No API calls at all — just confirm the pack parses and is valid.
         const record = buildRecord({
           spec,
+          packTitle: doc.settings.title,
+          preset: doc.settings.preset,
           fmt: {
             prompt: { scene: "(dry-run)", subjects: [] },
             cost_usd: 0,
@@ -140,9 +136,18 @@ export async function generate(
         total: filtered.length,
       });
 
+      const formatter = getFormatterForSpec(
+        spec,
+        doc.styles,
+        doc.palettes,
+        formatterCache,
+        opts.anthropicApiKey,
+      );
       const fmt = await formatter.format(spec.description, {
+        assetTypeHint: spec.type,
         aspectHint: spec.aspect,
         fileHint: spec.file,
+        promptFragment: spec.prompt_fragment,
       });
 
       if (opts.previewOnly) {
@@ -170,16 +175,22 @@ export async function generate(
         `asset "${spec.id}" output path`,
       );
       await mkdir(dirname(pngPath), { recursive: true });
-      await writeFile(pngPath, bflResult.image);
 
       const record = buildRecord({
         spec,
+        packTitle: doc.settings.title,
+        preset: doc.settings.preset,
         fmt,
         model,
         taskId: bflResult.task_id,
         bflCostUsd: bflResult.cost_usd,
         durationMs: bflResult.duration_ms,
       });
+      const pngWithMetadata = embedPngMetadata(
+        bflResult.image,
+        buildRawPngMetadata(record),
+      );
+      await writeFile(pngPath, pngWithMetadata);
 
       // Sidecar JSON — complete reproducibility record next to each PNG.
       const jsonPath = `${pngPath.slice(0, -4)}.json`;
@@ -255,7 +266,8 @@ function filterSpecs(
   if (section) {
     const needle = section.toLowerCase();
     filtered = filtered.filter((s) =>
-      s.section.toLowerCase().includes(needle),
+      s.section.toLowerCase().includes(needle) ||
+      s.section_id.toLowerCase().includes(needle),
     );
   }
   if (limit !== undefined && limit > 0 && limit < filtered.length) {
@@ -298,6 +310,8 @@ function pickSampleAcrossSections(
 
 function buildRecord(args: {
   spec: AssetSpec;
+  packTitle: string | undefined;
+  preset: string;
   fmt: { prompt: import("./types.js").FluxJsonPrompt; cost_usd: number };
   model: string;
   taskId: string;
@@ -305,13 +319,19 @@ function buildRecord(args: {
   durationMs: number;
 }): GenerationRecord {
   return {
+    pack_title: args.packTitle,
+    preset: args.preset,
     spec_id: args.spec.id,
     file: args.spec.file,
     spec_type: args.spec.type,
+    section_id: args.spec.section_id,
     section: args.spec.section,
+    style_id: args.spec.style_id,
+    palette_id: args.spec.palette_id,
     model: args.model,
     size: args.spec.size,
     aspect: args.spec.aspect,
+    prompt_fragment: args.spec.prompt_fragment,
     raw_description: args.spec.description,
     formatted_prompt: args.fmt.prompt,
     bfl_task_id: args.taskId,
@@ -327,4 +347,24 @@ function buildPreviewOutput(
   prompt: import("./types.js").FluxJsonPrompt,
 ): string {
   return `\n--- ${spec.id} (${spec.file}) ---\n${JSON.stringify(prompt, null, 2)}`;
+}
+
+function getFormatterForSpec(
+  spec: AssetSpec,
+  styles: Record<string, import("./types.js").StyleAnchor>,
+  palettes: Record<string, import("./types.js").Palette>,
+  cache: Map<string, ClaudeFormatter>,
+  apiKey: string,
+): ClaudeFormatter {
+  const key = `${spec.style_id}\u0000${spec.palette_id}`;
+  let formatter = cache.get(key);
+  if (!formatter) {
+    formatter = new ClaudeFormatter({
+      apiKey,
+      style: styles[spec.style_id],
+      palette: palettes[spec.palette_id],
+    });
+    cache.set(key, formatter);
+  }
+  return formatter;
 }

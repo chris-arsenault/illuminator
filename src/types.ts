@@ -1,7 +1,7 @@
 /**
  * Shared types across the illuminator CLI.
  *
- * Designed so a spec document (Markdown) can be parsed into AssetSpec[] and
+ * Designed so a pack definition can be parsed into AssetSpec[] and
  * handed through formatter → generator → post-processor as a stream. Each
  * stage enriches the record; nothing is mutated after it's set, so failures
  * stop at the stage they occur and partial progress is always inspectable.
@@ -68,17 +68,25 @@ export type AssetType =
   | "passthrough"; // copy as-is
 
 /**
- * A single asset in the spec document. Parsed from a `###` heading block.
+ * A single asset in the pack definition.
  */
 export interface AssetSpec {
-  /** Slug form of the heading, used as the stable id. */
+  /** Stable asset id from the TOML manifest. */
   id: string;
   /** Output path relative to the raw output directory. */
   file: string;
-  /** Which section (##) this belongs to — used for filtering. */
+  /** Stable section id from the TOML manifest. */
+  section_id: string;
+  /** Human-facing section title used for filtering and reporting. */
   section: string;
+  /** Resolved style id for this asset. */
+  style_id: string;
+  /** Resolved palette id for this asset. */
+  palette_id: string;
   /** Determines post-processing behavior. */
   type: AssetType;
+  /** Optional extra guidance injected for this asset type. */
+  prompt_fragment?: string;
   /** BFL aspect ratio or `WxH` in pixels. */
   aspect: string;
   /** BFL render size. Defaults to 1024x1024. */
@@ -88,14 +96,19 @@ export interface AssetSpec {
 }
 
 /**
- * Top-level spec document settings. Parsed from a `settings` block at the
- * start of the markdown.
+ * Top-level pack settings.
  */
 export interface DocSettings {
+  /** Optional human-facing pack title. */
+  title?: string;
   /** Which style anchor to use (e.g. "glacial-archive"). */
   preset: string;
   /** BFL model id. Defaults to flux-2-pro. */
   model: string;
+  /** Default named style id for assets in this pack. */
+  default_style: string;
+  /** Default named palette id for assets in this pack. */
+  default_palette: string;
   /** Fallback size for specs that don't set their own. */
   default_size: string;
   /** Fallback aspect for specs that don't set their own. */
@@ -104,12 +117,14 @@ export interface DocSettings {
 
 export interface AssetDoc {
   settings: DocSettings;
+  styles: Record<string, StyleAnchor>;
+  palettes: Record<string, Palette>;
   specs: AssetSpec[];
 }
 
 /**
  * The JSON prompt shape BFL Flux 2 expects. Claude synthesizes this from the
- * spec's raw description + style anchor + palette.
+ * asset's raw description + style anchor + palette.
  *
  * The whole object is JSON-stringified and sent as the Flux `prompt` field —
  * scene and subjects are all the model receives.
@@ -133,15 +148,26 @@ export interface FluxSubject {
  * final sent prompt are all recorded.
  */
 export interface GenerationRecord {
+  /** Optional human-facing pack title. */
+  pack_title?: string;
+  /** Base preset id used for this generation. */
+  preset: string;
   spec_id: string;
   file: string;
   /** Asset type (determines which post-processor transform applies). */
   spec_type: AssetType;
-  /** Section the spec came from (for filtering and reporting). */
+  /** Stable section id from the pack definition. */
+  section_id: string;
+  /** Section the asset came from (for filtering and reporting). */
   section: string;
+  /** Resolved style id for this generation. */
+  style_id: string;
+  /** Resolved palette id for this generation. */
+  palette_id: string;
   model: string;
   size: string;
   aspect: string;
+  prompt_fragment?: string;
   raw_description: string;
   formatted_prompt: FluxJsonPrompt;
   bfl_task_id: string;

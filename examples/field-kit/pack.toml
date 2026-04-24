@@ -1,0 +1,82 @@
+title = "Field Kit"
+preset = "glacial-archive"
+model = "flux-2-pro"
+
+# A tiny demo pack showing the illuminator format end-to-end. Five assets,
+# two sections, one named style override, one named palette override, one
+# type prompt fragment, and both prompt forms (file reference + inline).
+#
+# For a full production pack, see the-canonry-game/illumination/pack.toml.
+
+[defaults]
+size = "1024x1024"
+aspect = "1:1"
+
+[style.refined]
+name = "Refined"
+composition = "centered subject with generous negative space, slight drop shadow grounding the object on the page"
+
+[palette.signal]
+name = "Signal"
+primary = ["#D97742", "#B04646", "#C9A96B"]
+secondary = ["#0B0F14", "#19202C", "#E7E3D5"]
+notes = "Higher-contrast variant of the preset palette — intended for small icons that must read at 16px."
+
+[type_prompt_fragment]
+icon = "Keep the icon silhouette bold and readable at 16px — strong shape, minimal interior detail."
+
+# --- Section 1: naturalist specimens, two sprites ---
+
+[[section]]
+id = "specimens"
+title = "Specimens"
+style = "refined"
+
+[[section.asset]]
+id = "owl"
+file = "sprites/owl.png"
+type = "sprite"
+prompt = "prompts/specimens/owl.md"
+
+[[section.asset]]
+id = "lantern"
+file = "sprites/lantern.png"
+type = "sprite"
+# Prompts can be inline when the description is short enough that a separate
+# file feels like overhead. Both forms produce identical pipelines downstream.
+prompt_inline = """
+A small brass oil lantern resting on a stone surface, warm amber glow
+through its glass panes, handle tilted slightly. Viewed from a 3/4
+overhead angle.
+"""
+
+# --- Section 2: icons, using the signal palette for contrast ---
+
+[[section]]
+id = "icons"
+title = "Icons"
+palette = "signal"
+
+[[section.asset]]
+id = "compass"
+file = "icons/compass.png"
+type = "icon"
+prompt = "prompts/icons/compass.md"
+
+[[section.asset]]
+id = "flame"
+file = "icons/flame.png"
+type = "icon"
+prompt_inline = """
+A simple three-tongued flame, symmetric, filled with ember-orange inside
+a dark ink outline.
+"""
+
+[[section.asset]]
+id = "key"
+file = "icons/key.png"
+type = "icon"
+prompt_inline = """
+A single old iron key seen in profile — round bow, squared teeth,
+slightly worn.
+"""

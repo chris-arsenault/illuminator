@@ -5,8 +5,9 @@ import {
 } from "./presets/glacial-archive.js";
 
 /**
- * Registry of available style presets. Each preset is a pair of (StyleAnchor,
- * Palette) that get applied uniformly across every image in a batch.
+ * Registry of available base presets. Each preset is a pair of
+ * (StyleAnchor, Palette) that a pack can use directly or override with named
+ * style/palette entries.
  *
  * To add a new preset: create `src/presets/<name>.ts` exporting a style +
  * palette, import here, and register it below.

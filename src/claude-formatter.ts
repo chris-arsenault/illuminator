@@ -11,9 +11,9 @@ import { buildPaletteContext } from "./palette.js";
  * BFL Flux 2 JSON prompt format.
  *
  * The template is adapted from illuminator's FLUX_2_SUBJECT_SYNTHESIS_TEMPLATE,
- * with the style anchor and palette spliced in so every image in a batch
- * receives identical artistic direction. The full template is the cached
- * system prompt — we only pay for output tokens per image after the first.
+ * with the resolved style anchor and palette spliced in for each formatter
+ * instance. The full template is the cached system prompt — we only pay for
+ * output tokens per image after the first call for a given style/palette pair.
  *
  * Lessons baked in (carried over from illuminator):
  *  - Flux 2 degrades with long prompts → ~20 words per subject
@@ -74,7 +74,12 @@ export class ClaudeFormatter {
 
   async format(
     description: string,
-    opts: { aspectHint?: string; fileHint?: string } = {},
+    opts: {
+      assetTypeHint?: string;
+      aspectHint?: string;
+      fileHint?: string;
+      promptFragment?: string;
+    } = {},
   ): Promise<FormatResult> {
     const userMessage = buildUserMessage(description, opts);
 
@@ -122,11 +127,22 @@ export class ClaudeFormatter {
 
 function buildUserMessage(
   description: string,
-  opts: { aspectHint?: string; fileHint?: string },
+  opts: {
+    assetTypeHint?: string;
+    aspectHint?: string;
+    fileHint?: string;
+    promptFragment?: string;
+  },
 ): string {
   const parts: string[] = [];
   if (opts.fileHint) parts.push(`Output filename: ${opts.fileHint}`);
+  if (opts.assetTypeHint) parts.push(`Asset type: ${opts.assetTypeHint}`);
   if (opts.aspectHint) parts.push(`Aspect ratio: ${opts.aspectHint}`);
+  if (opts.promptFragment) {
+    parts.push("");
+    parts.push("Asset-specific guidance:");
+    parts.push(opts.promptFragment.trim());
+  }
   parts.push("");
   parts.push("Visual description:");
   parts.push(description.trim());

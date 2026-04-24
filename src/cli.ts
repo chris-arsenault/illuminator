@@ -11,22 +11,22 @@ import {
 } from "./validation.js";
 import type { ProgressEvent } from "./generate.js";
 
-const USAGE = `illuminator — generate illustrations from a spec document.
+const USAGE = `illuminator — generate illustrations from a TOML pack.
 
 Usage:
-  illuminator generate <spec.md> [options]
+  illuminator generate <pack.toml|dir> [options]
   illuminator process <raw-dir> <out-dir>
   illuminator presets
   illuminator --help
 
 generate options:
   --out <dir>           Output directory for raw PNGs (default: ./raw)
-  --section <name>      Only generate assets whose section contains this text
+  --section <name>      Only generate assets whose section id/title matches
   --limit <n>           Limit to N assets — picks round-robin across sections
   --smoke-test          Alias for --limit 3
-  --dry-run             Parse + format + validate, skip BFL generation
+  --dry-run             Parse + validate only, skip Claude and BFL
   --preview             Print formatted Flux 2 JSON to stdout, skip everything else
-  --model <id>          Override model from spec (e.g. flux-2-pro, flux-2-max)
+  --model <id>          Override model from pack (e.g. flux-2-pro, flux-2-max)
   --concurrency <n>     Parallelism for formatting/generation (1-${MAX_CONCURRENCY}, default: 1)
 
 Environment:
@@ -35,8 +35,10 @@ Environment:
   CLAUDE_API_KEY        Fallback alias for ANTHROPIC_API_KEY
 
 process: runs the Python post-processor (post/process.py) against the
-raw directory and writes finished assets to out-dir. Requires python3 with
-rembg, Pillow, and click installed — see post/requirements.txt.
+raw directory and writes finished assets to out-dir. It embeds provenance
+metadata in output PNGs, applies automatic cutout policies by asset type,
+and builds sprite/icon atlases. Requires python3 with rembg, Pillow, and
+click installed — see post/requirements.txt.
 
 presets: list available style presets.
 `;
@@ -98,16 +100,16 @@ async function runGenerate(args: string[]): Promise<void> {
   }
 
   if (positional.length === 0) {
-    failUsage("generate: missing <spec.md>");
+    failUsage("generate: missing <pack.toml|dir>");
   }
   if (positional.length > 1) {
-    failUsage("generate: expected exactly one <spec.md> path.");
+    failUsage("generate: expected exactly one <pack.toml|dir> argument.");
   }
   if (bools.has("dry-run") && bools.has("preview")) {
     failUsage("generate: --dry-run and --preview cannot be used together.");
   }
 
-  const specPath = resolve(process.cwd(), positional[0]);
+  const packPath = resolve(process.cwd(), positional[0]);
   const outDir = resolve(
     process.cwd(),
     flags.get("out") ?? "raw",
@@ -145,11 +147,11 @@ async function runGenerate(args: string[]): Promise<void> {
     console.error(
       "error: ANTHROPIC_API_KEY is not set. Claude formatting is required.",
     );
-      process.exit(2);
+    process.exit(2);
   }
 
   const summary = await generate({
-    specPath,
+    packPath,
     outDir,
     section: flags.get("section"),
     limit,

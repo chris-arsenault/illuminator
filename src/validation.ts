@@ -10,6 +10,7 @@ export const SUPPORTED_BFL_MODELS = [
 export const MAX_CONCURRENCY = 8;
 const MIN_RENDER_DIMENSION_PX = 256;
 const MAX_RENDER_DIMENSION_PX = 4096;
+const SAFE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export function validateModelId(
   rawModel: string,
@@ -77,25 +78,14 @@ export function validateAssetOutputPath(
   rawFile: string,
   context = "file",
 ): string {
-  const normalized = rawFile.trim().replace(/\\/g, "/");
-  if (!normalized) {
-    throw new Error(`${context} must not be empty.`);
-  }
-  if (normalized.startsWith("/") || /^[a-z]:\//i.test(normalized)) {
-    throw new Error(`${context} must be a relative path inside the output directory.`);
-  }
-  if (!normalized.toLowerCase().endsWith(".png")) {
-    throw new Error(`${context} must end in .png.`);
-  }
+  return validateRelativePath(rawFile, context, { extension: ".png" });
+}
 
-  const segments = normalized.split("/");
-  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
-    throw new Error(
-      `${context} must not contain empty, '.' or '..' path segments.`,
-    );
-  }
-
-  return segments.join("/");
+export function validatePromptSourcePath(
+  rawPath: string,
+  context = "prompt",
+): string {
+  return validateRelativePath(rawPath, context, { extension: ".md" });
 }
 
 export function resolveSafeOutputPath(
@@ -104,13 +94,71 @@ export function resolveSafeOutputPath(
   context = "output path",
 ): string {
   const safeRelativeFile = validateAssetOutputPath(relativeFile, context);
-  const resolvedRoot = resolve(outputRoot);
-  const resolvedTarget = resolve(resolvedRoot, safeRelativeFile);
+  return resolveSafePathWithinRoot(outputRoot, safeRelativeFile, context);
+}
+
+export function resolveSafePathWithinRoot(
+  rootDir: string,
+  relativePath: string,
+  context = "path",
+): string {
+  const resolvedRoot = resolve(rootDir);
+  const resolvedTarget = resolve(resolvedRoot, relativePath);
   const rel = relative(resolvedRoot, resolvedTarget);
   if (rel.startsWith("..") || isAbsolute(rel)) {
-    throw new Error(`${context} escapes the output directory.`);
+    throw new Error(`${context} escapes the containing directory.`);
   }
   return resolvedTarget;
+}
+
+export function validateRelativePath(
+  rawPath: string,
+  context = "path",
+  opts: { extension?: string } = {},
+): string {
+  const normalized = rawPath.trim().replace(/\\/g, "/");
+  if (!normalized) {
+    throw new Error(`${context} must not be empty.`);
+  }
+  if (normalized.startsWith("/") || /^[a-z]:\//i.test(normalized)) {
+    throw new Error(`${context} must be a relative path inside the pack directory.`);
+  }
+
+  const segments = normalized.split("/");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new Error(
+      `${context} must not contain empty, '.' or '..' path segments.`,
+    );
+  }
+  if (opts.extension && !normalized.toLowerCase().endsWith(opts.extension)) {
+    throw new Error(`${context} must end in ${opts.extension}.`);
+  }
+
+  return segments.join("/");
+}
+
+export function validateIdentifier(
+  rawId: string,
+  context = "id",
+): string {
+  const id = rawId.trim();
+  if (!SAFE_ID.test(id)) {
+    throw new Error(
+      `${context} must match ${SAFE_ID.source} and use lowercase kebab-case.`,
+    );
+  }
+  return id;
+}
+
+export function validateNonEmptyText(
+  rawText: string,
+  context = "text",
+): string {
+  const text = rawText.trim();
+  if (!text) {
+    throw new Error(`${context} must not be empty.`);
+  }
+  return text;
 }
 
 export function parseBoundedIntegerFlag(

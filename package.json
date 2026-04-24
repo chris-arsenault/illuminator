@@ -1,14 +1,14 @@
 {
   "name": "illuminator",
   "version": "0.1.0",
-  "description": "CLI for generating cohesive illustration batches from a markdown spec, powered by BFL Flux 2 + Claude prompt formatting.",
+  "description": "CLI for generating cohesive illustration batches from a TOML pack, powered by BFL Flux 2 + Claude prompt formatting.",
   "type": "module",
   "bin": {
     "illuminator": "./dist/cli.js"
   },
   "main": "./dist/cli.js",
   "scripts": {
-    "build": "tsc",
+    "build": "npm run clean && tsc",
     "dev": "tsc --watch",
     "lint:docs": "markdownlint-cli2",
     "start": "node ./dist/cli.js",
@@ -20,7 +20,8 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.68.0"
+    "@anthropic-ai/sdk": "^0.68.0",
+    "smol-toml": "^1.6.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
