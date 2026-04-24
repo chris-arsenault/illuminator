@@ -1,0 +1,15 @@
+{
+  // examples/ contains spec fixtures with heading/layout rules that differ
+  // intentionally from prose Markdown, so lint the human-facing docs here.
+  "globs": [
+    "README.md",
+    "HANDOFF.md"
+  ],
+  "ignores": [
+    "node_modules/**",
+    "dist/**"
+  ],
+  "config": {
+    "MD013": false
+  }
+}

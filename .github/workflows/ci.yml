@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Lint docs
+        run: npm run lint:docs
+
+      - name: Lint typecheck
+        run: npm run build
+
+      - name: Test node
+        run: npm run test:node
+
+      - name: Test python compile
+        run: python3 -m py_compile post/process.py

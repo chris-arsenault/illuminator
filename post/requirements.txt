@@ -1,0 +1,13 @@
+# Python dependencies for illuminator post-processing.
+#
+# Install:
+#   python -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r post/requirements.txt
+#
+# On Linux/Mac, the CPU-only variant of rembg is usually enough and skips
+# the heavy ONNX GPU dependency tree. If you need GPU: pip install rembg[gpu]
+
+rembg[cpu]>=2.0.50
+pillow>=10.0.0
+click>=8.1.0

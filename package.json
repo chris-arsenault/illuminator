@@ -1,0 +1,30 @@
+{
+  "name": "illuminator",
+  "version": "0.1.0",
+  "description": "CLI for generating cohesive illustration batches from a markdown spec, powered by BFL Flux 2 + Claude prompt formatting.",
+  "type": "module",
+  "bin": {
+    "illuminator": "./dist/cli.js"
+  },
+  "main": "./dist/cli.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint:docs": "markdownlint-cli2",
+    "start": "node ./dist/cli.js",
+    "clean": "rm -rf dist",
+    "test:node": "node --test test/*.test.mjs",
+    "test": "npm run build && npm run test:node"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "markdownlint-cli2": "^0.22.1",
+    "typescript": "^5.6.0"
+  }
+}

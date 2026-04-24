@@ -1,0 +1,22 @@
+node_modules/
+dist/
+*.log
+.env
+.env.local
+.env.*.local
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local generation output
+raw/
+out/
+assets/
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
