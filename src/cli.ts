@@ -20,7 +20,9 @@ Usage:
   illuminator --help
 
 generate options:
-  --out <dir>           Output directory for raw PNGs (default: ./raw)
+  --out <dir>           Container directory for outputs. Raw PNGs go to
+                        <out>/raw, processed assets to <out>/processed.
+                        Defaults to <pack-dir>/output.
   --section <name>      Only generate assets whose section id/title matches
   --limit <n>           Limit to N assets — picks round-robin across sections
   --smoke-test          Alias for --limit 3
@@ -28,6 +30,9 @@ generate options:
   --preview             Print formatted Flux 2 JSON to stdout, skip everything else
   --model <id>          Override model from pack (e.g. flux-2-pro, flux-2-max)
   --concurrency <n>     Parallelism for formatting/generation (1-${MAX_CONCURRENCY}, default: 1)
+  --and-process         Run the Python post-processor on generated raw/ assets
+                        immediately after generation. Uses --concurrency for
+                        internal parallelism; atlases built at the end.
 
 Environment:
   BFL_API_KEY           Required for BFL image generation
@@ -73,7 +78,12 @@ async function runGenerate(args: string[]): Promise<void> {
   const positional: string[] = [];
   const flags = new Map<string, string>();
   const bools = new Set<string>();
-  const booleanFlags = new Set(["dry-run", "preview", "smoke-test"]);
+  const booleanFlags = new Set([
+    "dry-run",
+    "preview",
+    "smoke-test",
+    "and-process",
+  ]);
   const valueFlags = new Set(["out", "section", "limit", "model", "concurrency"]);
 
   for (let i = 0; i < args.length; i++) {
@@ -110,10 +120,11 @@ async function runGenerate(args: string[]): Promise<void> {
   }
 
   const packPath = resolve(process.cwd(), positional[0]);
-  const outDir = resolve(
-    process.cwd(),
-    flags.get("out") ?? "raw",
-  );
+  // Resolve --out to absolute path iff provided; otherwise leave undefined so
+  // the generator defaults it to <pack-dir>/output.
+  const outDir = flags.has("out")
+    ? resolve(process.cwd(), flags.get("out")!)
+    : undefined;
 
   const anthropicApiKey =
     process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY || "";
@@ -159,6 +170,7 @@ async function runGenerate(args: string[]): Promise<void> {
     previewOnly,
     modelOverride,
     concurrency,
+    andProcess: bools.has("and-process"),
     anthropicApiKey,
     bflApiKey,
     onProgress: logProgress,
@@ -179,11 +191,23 @@ async function runGenerate(args: string[]): Promise<void> {
   console.log(`Finished: ${summary.successes.length} succeeded, ${summary.failures.length} failed`);
   console.log(`Total cost: $${summary.total_cost_usd.toFixed(4)}`);
   console.log(`Duration: ${(summary.duration_ms / 1000).toFixed(1)}s`);
+  console.log(`Raw output: ${summary.rawDir}`);
+  if (summary.processedDir) {
+    const pp = summary.postProcess;
+    const ppDuration = pp ? ` (${(pp.duration_ms / 1000).toFixed(1)}s)` : "";
+    console.log(`Processed output: ${summary.processedDir}${ppDuration}`);
+  }
   if (summary.failures.length > 0) {
     console.log("\nFailures:");
     for (const f of summary.failures) {
       console.log(`  ${f.spec.id}: ${f.error}`);
     }
+    process.exit(1);
+  }
+  if (summary.postProcess && summary.postProcess.exit_code !== 0) {
+    console.error(
+      `\nPost-processor exited with code ${summary.postProcess.exit_code}.`,
+    );
     process.exit(1);
   }
 }

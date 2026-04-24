@@ -116,6 +116,9 @@ export interface DocSettings {
 }
 
 export interface AssetDoc {
+  /** Absolute path to the directory containing pack.toml. Used to derive the
+   * default output location (`<packDir>/output`) when --out is not given. */
+  packDir: string;
   settings: DocSettings;
   styles: Record<string, StyleAnchor>;
   palettes: Record<string, Palette>;

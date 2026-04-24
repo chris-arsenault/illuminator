@@ -49,8 +49,11 @@ constraints is where things drift.
 Example:
 
 ```bash
-node dist/cli.js generate examples/field-kit --out ./raw
-node dist/cli.js process ./raw ./out
+node dist/cli.js generate examples/field-kit --and-process --concurrency 3
 ```
+
+Raw Flux outputs land at `examples/field-kit/output/raw/`, post-processed
+assets at `examples/field-kit/output/processed/`. Override with `--out /some/dir`
+if you want them elsewhere.
 
 If you want details, start with the [Usage Guide](docs/usage.md).

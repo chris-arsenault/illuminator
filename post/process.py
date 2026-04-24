@@ -23,9 +23,11 @@ Expects Python 3.10+ with: rembg, pillow, click.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
+from threading import Lock
 import json
 import math
 import re
@@ -95,6 +97,9 @@ class CutoutPolicy:
         return "+".join(parts)
 
 
+MAX_CONCURRENCY = 16
+
+
 @click.command()
 @click.argument("raw_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.argument("out_dir", type=click.Path(file_okay=False, path_type=Path))
@@ -104,7 +109,19 @@ class CutoutPolicy:
     default=None,
     help="Only process this asset type (e.g. sprite, hex-tile, icon).",
 )
-def main(raw_dir: Path, out_dir: Path, only_type: str | None) -> None:
+@click.option(
+    "--concurrency",
+    "concurrency",
+    default=1,
+    type=click.IntRange(1, MAX_CONCURRENCY),
+    help=f"Parallel workers for per-image processing (1-{MAX_CONCURRENCY}, default: 1).",
+)
+def main(
+    raw_dir: Path,
+    out_dir: Path,
+    only_type: str | None,
+    concurrency: int,
+) -> None:
     """Process every PNG in RAW_DIR that has a sidecar .json, write to OUT_DIR."""
     out_dir.mkdir(parents=True, exist_ok=True)
     out_dir = out_dir.resolve()
@@ -114,29 +131,51 @@ def main(raw_dir: Path, out_dir: Path, only_type: str | None) -> None:
         click.echo(f"No PNG+JSON pairs found in {raw_dir}")
         sys.exit(1)
 
-    results: list[tuple[Path, str, list[ProcessedOutput]]] = []
-    processed_outputs: list[ProcessedOutput] = []
-
+    # Filter to jobs we actually intend to run so the summary math is honest
+    # when --type is applied.
+    jobs: list[tuple[Path, dict[str, Any], str, Path, Path]] = []
     for png_path, meta in pairs:
         asset_type = resolve_asset_type(meta)
         if only_type and asset_type != only_type:
             continue
-
         rel_out = validate_output_path(meta.get("file", png_path.name))
         target = resolve_safe_output_path(out_dir, rel_out)
         target.parent.mkdir(parents=True, exist_ok=True)
+        jobs.append((png_path, meta, asset_type, rel_out, target))
 
+    if not jobs:
+        click.echo("No jobs matched the given filter.")
+        sys.exit(0)
+
+    results: list[tuple[Path, str, list[ProcessedOutput]]] = []
+    processed_outputs: list[ProcessedOutput] = []
+    # click.echo and shared lists must be serialized across worker threads.
+    io_lock = Lock()
+
+    def _run(job: tuple[Path, dict[str, Any], str, Path, Path]) -> None:
+        png_path, meta, asset_type, rel_out, target = job
         try:
             outputs = process_one(png_path, target, asset_type, meta, out_dir)
-            processed_outputs.extend(outputs)
-            results.append((png_path, "ok", outputs))
-            click.echo(
-                f"  {asset_type:<12} {rel_out} -> "
-                f"{', '.join(str(p.path.relative_to(out_dir)) for p in outputs)}"
-            )
+            with io_lock:
+                processed_outputs.extend(outputs)
+                results.append((png_path, "ok", outputs))
+                click.echo(
+                    f"  {asset_type:<12} {rel_out} -> "
+                    f"{', '.join(str(p.path.relative_to(out_dir)) for p in outputs)}"
+                )
         except Exception as exc:  # noqa: BLE001 -- report and continue
-            results.append((png_path, f"fail: {exc}", []))
-            click.echo(f"  {asset_type:<12} {rel_out} FAILED: {exc}", err=True)
+            with io_lock:
+                results.append((png_path, f"fail: {exc}", []))
+                click.echo(
+                    f"  {asset_type:<12} {rel_out} FAILED: {exc}", err=True
+                )
+
+    # ONNX inference inside rembg releases the GIL, so a ThreadPoolExecutor
+    # gives real parallelism without spawning one model load per worker
+    # process. Pillow ops likewise release the GIL for C-backed paths.
+    workers = max(1, min(concurrency, len(jobs)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(as_completed(pool.submit(_run, job) for job in jobs))
 
     atlas_outputs: list[Path] = []
     if processed_outputs:

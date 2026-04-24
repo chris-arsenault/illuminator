@@ -124,7 +124,7 @@ export async function loadPack(inputPath: string): Promise<AssetDoc> {
     },
   );
 
-  return { settings, styles, palettes, specs };
+  return { packDir, settings, styles, palettes, specs };
 }
 
 async function resolvePackPath(inputPath: string): Promise<string> {

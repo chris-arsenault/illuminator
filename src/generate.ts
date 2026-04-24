@@ -1,5 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { BflClient } from "./bfl-client.js";
 import { ClaudeFormatter } from "./claude-formatter.js";
 import { loadPack } from "./parse-pack.js";
@@ -17,8 +19,13 @@ import type {
 export interface GenerateOptions {
   /** Absolute path to pack.toml or a directory containing it. */
   packPath: string;
-  /** Absolute path to the raw output directory. */
-  outDir: string;
+  /**
+   * Container directory for all outputs. Raw Flux PNGs go to `<outDir>/raw/`;
+   * post-processed assets go to `<outDir>/processed/` when --and-process is on.
+   *
+   * When omitted, defaults to `<packDir>/output/` — co-located with the pack.
+   */
+  outDir?: string;
   /** Filter to this section name (case-insensitive substring match). */
   section?: string;
   /** Limit to at most N assets (smoke test). Picks one-per-section when possible. */
@@ -31,6 +38,12 @@ export interface GenerateOptions {
   modelOverride?: string;
   /** Number of assets to process in parallel. */
   concurrency?: number;
+  /**
+   * After generation completes, run the Python post-processor on the raw/
+   * directory with output going to processed/. The separate `process`
+   * subcommand remains available for re-processing without regenerating.
+   */
+  andProcess?: boolean;
   /** Anthropic API key. */
   anthropicApiKey: string;
   /** BFL API key. */
@@ -70,6 +83,16 @@ export interface GenerateSummary {
   failures: Array<{ spec: AssetSpec; error: string }>;
   total_cost_usd: number;
   duration_ms: number;
+  /** Absolute path to the raw output directory actually used. */
+  rawDir: string;
+  /** Absolute path to the processed output directory (only populated when
+   *  --and-process is set and at least one generation succeeded). */
+  processedDir?: string;
+  /** Post-process outcome — only set when --and-process ran. */
+  postProcess?: {
+    exit_code: number;
+    duration_ms: number;
+  };
 }
 
 export async function generate(
@@ -77,6 +100,13 @@ export async function generate(
 ): Promise<GenerateSummary> {
   const doc = await loadPack(opts.packPath);
   const model = opts.modelOverride ?? doc.settings.model;
+
+  // Output is anchored to the pack directory by default so generated assets
+  // sit next to the source that produced them. --out still overrides for
+  // one-off runs or CI artifacts.
+  const outRoot = opts.outDir ?? resolve(doc.packDir, "output");
+  const rawDir = resolve(outRoot, "raw");
+  const processedDir = resolve(outRoot, "processed");
 
   const filtered = filterSpecs(doc.specs, opts.section, opts.limit);
   const concurrency = parseBoundedIntegerFlag(
@@ -170,7 +200,7 @@ export async function generate(
 
       // Write the PNG to disk at its target path inside the raw output dir.
       const pngPath = resolveSafeOutputPath(
-        opts.outDir,
+        rawDir,
         spec.file,
         `asset "${spec.id}" output path`,
       );
@@ -254,7 +284,54 @@ export async function generate(
     duration_ms,
   });
 
-  return { successes, failures, total_cost_usd, duration_ms };
+  // Post-processing: run on whatever generations succeeded, regardless of
+  // whether some assets failed. The user only loses post-processing when
+  // literally nothing was written to raw/ (dry-run, preview, or total failure).
+  let postProcess: GenerateSummary["postProcess"] | undefined;
+  if (
+    opts.andProcess &&
+    !opts.dryRun &&
+    !opts.previewOnly &&
+    successes.length > 0
+  ) {
+    postProcess = await runPostProcessor(rawDir, processedDir, concurrency);
+  }
+
+  return {
+    successes,
+    failures,
+    total_cost_usd,
+    duration_ms,
+    rawDir,
+    // Only surface processedDir when we actually ran the post-processor —
+    // otherwise the summary would promise an output that doesn't exist.
+    processedDir: postProcess ? processedDir : undefined,
+    postProcess,
+  };
+}
+
+async function runPostProcessor(
+  rawDir: string,
+  processedDir: string,
+  concurrency: number,
+): Promise<{ exit_code: number; duration_ms: number }> {
+  // Locate post/process.py relative to this compiled module. `import.meta.url`
+  // points at dist/generate.js in production, so ../post/process.py resolves
+  // to the repo's post directory.
+  const here = fileURLToPath(import.meta.url);
+  const scriptPath = resolve(dirname(here), "..", "post", "process.py");
+
+  const started = Date.now();
+  const exitCode: number = await new Promise((resolveFn, rejectFn) => {
+    const child = spawn(
+      "python3",
+      [scriptPath, rawDir, processedDir, "--concurrency", String(concurrency)],
+      { stdio: "inherit" },
+    );
+    child.on("close", (code) => resolveFn(code ?? 0));
+    child.on("error", rejectFn);
+  });
+  return { exit_code: exitCode, duration_ms: Date.now() - started };
 }
 
 function filterSpecs(

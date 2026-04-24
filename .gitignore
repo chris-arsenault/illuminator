@@ -11,7 +11,10 @@ venv/
 __pycache__/
 *.pyc
 
-# Local generation output
+# Local generation output — every pack writes to <pack-dir>/output by default.
+# Legacy repo-root raw/ and out/ kept for safety against --out overrides.
+examples/*/output/
+output/
 raw/
 out/
 assets/
