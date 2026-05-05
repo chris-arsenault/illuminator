@@ -31,24 +31,26 @@ generate options:
   --smoke-test          Alias for --limit 3
   --reprocess           Regenerate selected assets even when raw PNGs already
                         exist. By default, only missing raw assets are run.
-  --dry-run             Parse + validate only, skip Claude and BFL
-  --preview             Print formatted Flux 2 JSON to stdout, skip everything else
-  --model <id>          Override model from pack (e.g. flux-2-pro, flux-2-max)
+  --dry-run             Parse + validate only, skip Claude and image generation
+  --preview             Print formatted prompts to stdout, skip everything else
+  --model <id>          Override model from pack (e.g. flux-2-pro, gpt-image-1.5)
   --concurrency <n>     Parallelism for formatting/generation (1-${MAX_CONCURRENCY}, default: 1)
   --and-process         Run the Python post-processor on generated raw/ assets
                         immediately after generation. Uses --concurrency for
-                        internal parallelism; atlases built at the end.
+                        internal parallelism; full-pack runs rebuild atlases.
 
 Environment:
-  BFL_API_KEY           Required for BFL image generation
+  BFL_API_KEY           Required for BFL image models
+  OPENAI_API_KEY        Required for OpenAI image models
   ANTHROPIC_API_KEY     Required for Claude prompt formatting
   CLAUDE_API_KEY        Fallback alias for ANTHROPIC_API_KEY
 
 process: runs the Python post-processor (post/process.py) against the
-raw directory and writes finished assets to out-dir. It embeds provenance
-metadata in output PNGs, applies automatic cutout policies by asset type,
-and builds sprite/icon atlases. Requires python3 with rembg, Pillow, and
-click installed — see post/requirements.txt.
+raw directory and writes finished assets to out-dir. It skips existing
+processed outputs by default; pass --reprocess after <out-dir> to overwrite.
+It embeds provenance metadata in output PNGs, applies automatic cutout
+policies by asset type, and builds sprite/icon atlases. Requires python3
+with rembg, Pillow, and click installed — see post/requirements.txt.
 
 presets: list available style presets.
 `;
@@ -135,6 +137,7 @@ async function runGenerate(args: string[]): Promise<void> {
   const anthropicApiKey =
     process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY || "";
   const bflApiKey = process.env.BFL_API_KEY || "";
+  const openaiApiKey = process.env.OPENAI_API_KEY || "";
 
   const dryRun = bools.has("dry-run");
   const previewOnly = bools.has("preview");
@@ -167,6 +170,7 @@ async function runGenerate(args: string[]): Promise<void> {
     reprocess: bools.has("reprocess"),
     anthropicApiKey,
     bflApiKey,
+    openaiApiKey,
     onProgress: logProgress,
   });
 
@@ -247,14 +251,53 @@ function logProgress(event: ProgressEvent): void {
 }
 
 async function runProcess(args: string[]): Promise<void> {
-  if (args.length < 2) {
+  const positional: string[] = [];
+  const passthrough: string[] = [];
+  const booleanFlags = new Set(["reprocess", "skip-atlases"]);
+  const valueFlags = new Set([
+    "type",
+    "asset",
+    "concurrency",
+    "color-recovery",
+    "saturation-boost",
+    "washed-saturation-threshold",
+    "washed-contrast-threshold",
+    "lut",
+    "lut-strength",
+  ]);
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (!arg.startsWith("--")) {
+      positional.push(arg);
+      continue;
+    }
+
+    const name = arg.slice(2);
+    if (booleanFlags.has(name)) {
+      passthrough.push(arg);
+      continue;
+    }
+    if (!valueFlags.has(name)) {
+      failUsage(`process: unknown option --${name}`);
+    }
+
+    const value = args[i + 1];
+    if (!value || value.startsWith("--")) {
+      failUsage(`process: option --${name} requires a value.`);
+    }
+    passthrough.push(arg, value);
+    i++;
+  }
+
+  if (positional.length < 2) {
     failUsage("process: expected <raw-dir> <out-dir>");
   }
-  if (args.length > 2) {
+  if (positional.length > 2) {
     failUsage("process: unexpected extra arguments.");
   }
-  const rawDir = resolve(process.cwd(), args[0]);
-  const outDir = resolve(process.cwd(), args[1]);
+  const rawDir = resolve(process.cwd(), positional[0]);
+  const outDir = resolve(process.cwd(), positional[1]);
 
   // post/process.py lives relative to this file in the built output.
   const here = fileURLToPath(import.meta.url);
@@ -263,7 +306,7 @@ async function runProcess(args: string[]): Promise<void> {
   await new Promise<void>((resolveFn, rejectFn) => {
     const child = spawn(
       "python3",
-      [scriptPath, rawDir, outDir],
+      [scriptPath, rawDir, outDir, ...passthrough],
       { stdio: "inherit" },
     );
     child.on("close", (code) => {

@@ -55,6 +55,27 @@ export interface Palette {
 }
 
 /**
+ * A visual identity — a canonical description of a subject's cultural /
+ * factional / species grounding. Selected per asset, spliced into the Claude
+ * user message on generation.
+ *
+ * Identities exist so the vocabulary of a world (e.g. "Aurora Stack penguins
+ * wear pale ice-plate; Nightshelf penguins wear charcoal wraps with
+ * ember-thread") can live in ONE place and be referenced by many assets
+ * instead of copy-pasted into every prompt (where it drifts).
+ *
+ * Word-budget discipline: keep `description` under ~150 words. Identity is
+ * spliced alongside the asset's own prompt, the type fragment, and hints —
+ * verbosity pushes Claude toward truncating useful detail elsewhere.
+ */
+export interface Identity {
+  id: string;
+  name: string;
+  /** Canonical description spliced into Claude's user message per asset. */
+  description: string;
+}
+
+/**
  * A processing type — determines which post-processor runs on the raw PNG.
  * Each type implies a specific set of transforms in post/process.py.
  */
@@ -83,13 +104,18 @@ export interface AssetSpec {
   style_id: string;
   /** Resolved palette id for this asset. */
   palette_id: string;
+  /**
+   * Resolved identity id for this asset, or null if none applies.
+   * Resolution order: asset.identity > section.identity > pack.default_identity > null.
+   */
+  identity_id: string | null;
   /** Determines post-processing behavior. */
   type: AssetType;
   /** Optional extra guidance injected for this asset type. */
   prompt_fragment?: string;
-  /** BFL aspect ratio or `WxH` in pixels. */
+  /** Aspect ratio hint or `WxH` in pixels. */
   aspect: string;
-  /** BFL render size. Defaults to 1024x1024. */
+  /** Render size. Defaults to 1024x1024. */
   size: string;
   /** Free-text visual description — the raw input to the formatter. */
   description: string;
@@ -103,12 +129,18 @@ export interface DocSettings {
   title?: string;
   /** Which style anchor to use (e.g. "glacial-archive"). */
   preset: string;
-  /** BFL model id. Defaults to flux-2-pro. */
+  /** Image model id. Defaults to flux-2-pro. */
   model: string;
   /** Default named style id for assets in this pack. */
   default_style: string;
   /** Default named palette id for assets in this pack. */
   default_palette: string;
+  /**
+   * Default named identity id for assets in this pack. Assets without their
+   * own identity (and sections without one) inherit this. Use null for packs
+   * whose subjects don't have a cultural grounding (e.g. UI chrome packs).
+   */
+  default_identity: string | null;
   /** Fallback size for specs that don't set their own. */
   default_size: string;
   /** Fallback aspect for specs that don't set their own. */
@@ -122,6 +154,7 @@ export interface AssetDoc {
   settings: DocSettings;
   styles: Record<string, StyleAnchor>;
   palettes: Record<string, Palette>;
+  identities: Record<string, Identity>;
   specs: AssetSpec[];
 }
 
@@ -145,9 +178,11 @@ export interface FluxSubject {
   detail_preservation?: "high" | "medium" | "low";
 }
 
+export type FormattedImagePrompt = string | FluxJsonPrompt;
+
 /**
  * Per-image metadata saved alongside the PNG. Enables reproducibility:
- * the raw description, the Claude-formatted JSON, the BFL task id, and the
+ * the raw description, the Claude-formatted prompt, the BFL task id, and the
  * final sent prompt are all recorded.
  */
 export interface GenerationRecord {
@@ -167,12 +202,14 @@ export interface GenerationRecord {
   style_id: string;
   /** Resolved palette id for this generation. */
   palette_id: string;
+  /** Resolved identity id, or null if none applies. */
+  identity_id: string | null;
   model: string;
   size: string;
   aspect: string;
   prompt_fragment?: string;
   raw_description: string;
-  formatted_prompt: FluxJsonPrompt;
+  formatted_prompt: FormattedImagePrompt;
   bfl_task_id: string;
   cost_usd: number;
   claude_cost_usd: number;

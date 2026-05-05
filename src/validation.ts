@@ -7,6 +7,22 @@ export const SUPPORTED_BFL_MODELS = [
   "flux-pro-1.1-ultra-raw",
 ] as const;
 
+export const SUPPORTED_OPENAI_IMAGE_MODELS = [
+  "gpt-image-1.5",
+  "gpt-image-1",
+  "dall-e-3",
+  "dall-e-2",
+] as const;
+
+export const SUPPORTED_IMAGE_MODELS = [
+  ...SUPPORTED_BFL_MODELS,
+  ...SUPPORTED_OPENAI_IMAGE_MODELS,
+] as const;
+
+export type FluxGeneration = "flux-1" | "flux-2";
+export type ImageProvider = "bfl" | "openai";
+export type OpenAiModelFamily = "gpt-image" | "dall-e-3" | "dall-e-2";
+
 export const MAX_CONCURRENCY = 8;
 const MIN_RENDER_DIMENSION_PX = 256;
 const MAX_RENDER_DIMENSION_PX = 4096;
@@ -20,12 +36,33 @@ export function validateModelId(
   if (!model) {
     throw new Error(`${context} must not be empty.`);
   }
-  if (!SUPPORTED_BFL_MODELS.includes(model as (typeof SUPPORTED_BFL_MODELS)[number])) {
+  if (!SUPPORTED_IMAGE_MODELS.includes(model as (typeof SUPPORTED_IMAGE_MODELS)[number])) {
     throw new Error(
-      `${context} must be one of: ${SUPPORTED_BFL_MODELS.join(", ")}.`,
+      `${context} must be one of: ${SUPPORTED_IMAGE_MODELS.join(", ")}.`,
     );
   }
   return model;
+}
+
+export function getImageProvider(model: string): ImageProvider {
+  if (SUPPORTED_BFL_MODELS.includes(model as (typeof SUPPORTED_BFL_MODELS)[number])) {
+    return "bfl";
+  }
+  if (SUPPORTED_OPENAI_IMAGE_MODELS.includes(model as (typeof SUPPORTED_OPENAI_IMAGE_MODELS)[number])) {
+    return "openai";
+  }
+  throw new Error(`Unsupported image model: ${model}`);
+}
+
+export function getFluxGeneration(model: string): FluxGeneration {
+  return model.includes("flux-2") ? "flux-2" : "flux-1";
+}
+
+export function getOpenAiModelFamily(model: string): OpenAiModelFamily | null {
+  if (model.startsWith("gpt-image")) return "gpt-image";
+  if (model === "dall-e-3") return "dall-e-3";
+  if (model === "dall-e-2") return "dall-e-2";
+  return null;
 }
 
 export function validateAspectRatio(

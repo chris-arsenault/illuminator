@@ -17,8 +17,10 @@ PNG sheets and JSON manifests automatically.
 
 Usage:
   python process.py <raw_dir> <out_dir> [--type <only-this-type>]
+      [--asset <spec-id[,spec-id]>] [--reprocess]
+      [--color-recovery auto|always|off] [--lut <look.cube>]
 
-Expects Python 3.10+ with: rembg, pillow, click.
+Expects Python 3.10+ with: rembg, pillow, click, numpy.
 """
 
 from __future__ import annotations
@@ -36,7 +38,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import click
-from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageStat
+import numpy as np
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps, ImageStat
 from PIL.PngImagePlugin import PngInfo
 
 try:
@@ -55,6 +58,11 @@ ATLAS_MAX_EDGE_PX = {
     "sprite": 4096,
     "icon": 2048,
 }
+DEFAULT_SATURATION_BOOST = 2.35
+DEFAULT_LUT_STRENGTH = 0.35
+WASHED_SATURATION_THRESHOLD = 0.18
+WASHED_CONTRAST_THRESHOLD = 0.38
+METRIC_ALPHA_THRESHOLD = 8
 VALID_ASSET_TYPES = {
     "sprite",
     "hex-tile",
@@ -97,6 +105,43 @@ class CutoutPolicy:
         return "+".join(parts)
 
 
+@dataclass(frozen=True)
+class CubeLut:
+    path: Path
+    title: str
+    size: int
+    table: np.ndarray
+    domain_min: np.ndarray
+    domain_max: np.ndarray
+
+
+@dataclass(frozen=True)
+class ColorConfig:
+    recovery_mode: str
+    saturation_boost: float
+    washed_saturation_threshold: float
+    washed_contrast_threshold: float
+    lut: CubeLut | None
+    lut_strength: float
+
+
+@dataclass(frozen=True)
+class ColorMetrics:
+    visible_coverage: float
+    saturation_mean: float
+    saturation_p90: float
+    luma_stddev: float
+    luma_p95_p05: float
+    washed_out: bool
+
+
+@dataclass(frozen=True)
+class ColorResult:
+    image: Image.Image
+    processing: tuple[str, ...]
+    diagnostics: dict[str, Any]
+
+
 MAX_CONCURRENCY = 16
 
 
@@ -110,21 +155,105 @@ MAX_CONCURRENCY = 16
     help="Only process this asset type (e.g. sprite, hex-tile, icon).",
 )
 @click.option(
+    "--asset",
+    "only_assets",
+    default=None,
+    help="Only process these asset ids (comma-separated spec_id values).",
+)
+@click.option(
+    "--reprocess",
+    "reprocess",
+    is_flag=True,
+    help="Overwrite existing processed outputs. Defaults to no overwrite.",
+)
+@click.option(
+    "--skip-atlases",
+    "skip_atlases",
+    is_flag=True,
+    help="Do not rebuild sprite/icon atlas sheets.",
+)
+@click.option(
     "--concurrency",
     "concurrency",
     default=1,
     type=click.IntRange(1, MAX_CONCURRENCY),
     help=f"Parallel workers for per-image processing (1-{MAX_CONCURRENCY}, default: 1).",
 )
+@click.option(
+    "--color-recovery",
+    "color_recovery",
+    default="auto",
+    show_default=True,
+    type=click.Choice(["auto", "always", "off"]),
+    help="Recover washed-out renders by boosting saturation.",
+)
+@click.option(
+    "--saturation-boost",
+    "saturation_boost",
+    default=DEFAULT_SATURATION_BOOST,
+    show_default=True,
+    type=click.FloatRange(1.0, 4.0),
+    help="Saturation multiplier used by color recovery.",
+)
+@click.option(
+    "--washed-saturation-threshold",
+    "washed_saturation_threshold",
+    default=WASHED_SATURATION_THRESHOLD,
+    show_default=True,
+    type=click.FloatRange(0.0, 1.0),
+    help="Mean saturation below this value can trigger auto recovery.",
+)
+@click.option(
+    "--washed-contrast-threshold",
+    "washed_contrast_threshold",
+    default=WASHED_CONTRAST_THRESHOLD,
+    show_default=True,
+    type=click.FloatRange(0.0, 1.0),
+    help="P95-P05 luminance contrast below this value can trigger auto recovery.",
+)
+@click.option(
+    "--lut",
+    "lut_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Optional .cube LUT to apply after saturation recovery.",
+)
+@click.option(
+    "--lut-strength",
+    "lut_strength",
+    default=DEFAULT_LUT_STRENGTH,
+    show_default=True,
+    type=click.FloatRange(0.0, 1.0),
+    help="Blend amount for the optional LUT.",
+)
 def main(
     raw_dir: Path,
     out_dir: Path,
     only_type: str | None,
+    only_assets: str | None,
+    reprocess: bool,
+    skip_atlases: bool,
     concurrency: int,
+    color_recovery: str,
+    saturation_boost: float,
+    washed_saturation_threshold: float,
+    washed_contrast_threshold: float,
+    lut_path: Path | None,
+    lut_strength: float,
 ) -> None:
     """Process every PNG in RAW_DIR that has a sidecar .json, write to OUT_DIR."""
     out_dir.mkdir(parents=True, exist_ok=True)
     out_dir = out_dir.resolve()
+    asset_filter = parse_asset_filter(only_assets)
+    filtered_run = only_type is not None or asset_filter is not None
+    color_config = ColorConfig(
+        recovery_mode=color_recovery,
+        saturation_boost=saturation_boost,
+        washed_saturation_threshold=washed_saturation_threshold,
+        washed_contrast_threshold=washed_contrast_threshold,
+        lut=load_cube_lut(lut_path) if lut_path is not None else None,
+        lut_strength=lut_strength,
+    )
 
     pairs = list(find_png_json_pairs(raw_dir))
     if not pairs:
@@ -134,17 +263,52 @@ def main(
     # Filter to jobs we actually intend to run so the summary math is honest
     # when --type is applied.
     jobs: list[tuple[Path, dict[str, Any], str, Path, Path]] = []
+    skipped_existing = 0
     for png_path, meta in pairs:
         asset_type = resolve_asset_type(meta)
         if only_type and asset_type != only_type:
             continue
+        spec_id = meta.get("spec_id")
+        if asset_filter is not None and (
+            not isinstance(spec_id, str) or spec_id not in asset_filter
+        ):
+            continue
         rel_out = validate_output_path(meta.get("file", png_path.name))
         target = resolve_safe_output_path(out_dir, rel_out)
         target.parent.mkdir(parents=True, exist_ok=True)
+        existing_outputs = [
+            output.path
+            for output in expected_processed_outputs(target, asset_type, meta)
+            if output.path.exists()
+        ]
+        if existing_outputs and not reprocess:
+            skipped_existing += 1
+            continue
         jobs.append((png_path, meta, asset_type, rel_out, target))
 
     if not jobs:
-        click.echo("No jobs matched the given filter.")
+        atlas_outputs: list[Path] = []
+        if skipped_existing and not skip_atlases and not filtered_run:
+            atlas_inputs = collect_processed_outputs_for_atlases(pairs, out_dir)
+            if atlas_inputs:
+                try:
+                    atlas_outputs = build_atlases(out_dir, atlas_inputs, reprocess=True)
+                except Exception as exc:  # noqa: BLE001 -- report and fail
+                    click.echo(f"\nAtlas build failed: {exc}", err=True)
+                    sys.exit(1)
+
+        if atlas_outputs:
+            click.echo("")
+            for atlas_path in atlas_outputs:
+                click.echo(f"  atlas        {atlas_path.relative_to(out_dir)}")
+            click.echo(f"{len(atlas_outputs)} atlas sheet(s) built")
+        if skipped_existing:
+            click.echo(
+                f"Skipped {skipped_existing} existing processed asset(s); "
+                "use --reprocess to overwrite."
+            )
+        else:
+            click.echo("No jobs matched the given filter.")
         sys.exit(0)
 
     results: list[tuple[Path, str, list[ProcessedOutput]]] = []
@@ -155,7 +319,14 @@ def main(
     def _run(job: tuple[Path, dict[str, Any], str, Path, Path]) -> None:
         png_path, meta, asset_type, rel_out, target = job
         try:
-            outputs = process_one(png_path, target, asset_type, meta, out_dir)
+            outputs = process_one(
+                png_path,
+                target,
+                asset_type,
+                meta,
+                out_dir,
+                color_config,
+            )
             with io_lock:
                 processed_outputs.extend(outputs)
                 results.append((png_path, "ok", outputs))
@@ -178,12 +349,20 @@ def main(
         list(as_completed(pool.submit(_run, job) for job in jobs))
 
     atlas_outputs: list[Path] = []
-    if processed_outputs:
-        try:
-            atlas_outputs = build_atlases(out_dir, processed_outputs)
-        except Exception as exc:  # noqa: BLE001 -- report and fail
-            click.echo(f"\nAtlas build failed: {exc}", err=True)
-            sys.exit(1)
+    if processed_outputs and not skip_atlases:
+        if filtered_run:
+            click.echo(
+                "  atlas        skipped for filtered run; process the full raw "
+                "directory to rebuild atlases"
+            )
+        else:
+            atlas_inputs = collect_processed_outputs_for_atlases(pairs, out_dir)
+            if atlas_inputs:
+                try:
+                    atlas_outputs = build_atlases(out_dir, atlas_inputs, reprocess=True)
+                except Exception as exc:  # noqa: BLE001 -- report and fail
+                    click.echo(f"\nAtlas build failed: {exc}", err=True)
+                    sys.exit(1)
 
     total = len(results)
     ok = sum(1 for _, status, _ in results if status == "ok")
@@ -196,8 +375,20 @@ def main(
     click.echo(f"\n{ok}/{total} succeeded")
     if atlas_outputs:
         click.echo(f"{len(atlas_outputs)} atlas sheet(s) built")
+    if skipped_existing:
+        click.echo(
+            f"{skipped_existing} existing processed asset(s) skipped; "
+            "use --reprocess to overwrite"
+        )
     if ok != total:
         sys.exit(1)
+
+
+def parse_asset_filter(raw: str | None) -> set[str] | None:
+    if raw is None:
+        return None
+    values = {part.strip() for part in raw.split(",") if part.strip()}
+    return values or set()
 
 
 def find_png_json_pairs(root: Path) -> Iterable[tuple[Path, dict[str, Any]]]:
@@ -267,30 +458,76 @@ def resolve_safe_output_path(out_dir: Path, relative_path: Path) -> Path:
     return target
 
 
+def expected_output_paths(target: Path, asset_type: str) -> list[Path]:
+    return [
+        output.path
+        for output in expected_processed_outputs(target, asset_type, meta={})
+    ]
+
+
+def expected_processed_outputs(
+    target: Path,
+    asset_type: str,
+    meta: dict[str, Any],
+) -> list[ProcessedOutput]:
+    if asset_type == "icon":
+        return [
+            ProcessedOutput(
+                target.parent / f"{target.stem}@{size}.png",
+                asset_type,
+                meta,
+                tuple(),
+                variant=f"size:{size}",
+            )
+            for size in ICON_SIZES
+        ]
+    return [ProcessedOutput(target, asset_type, meta, tuple())]
+
+
+def collect_processed_outputs_for_atlases(
+    pairs: Iterable[tuple[Path, dict[str, Any]]],
+    out_dir: Path,
+) -> list[ProcessedOutput]:
+    outputs: list[ProcessedOutput] = []
+    for png_path, meta in pairs:
+        asset_type = resolve_asset_type(meta)
+        if asset_type not in {"sprite", "icon"}:
+            continue
+        rel_out = validate_output_path(meta.get("file", png_path.name))
+        target = resolve_safe_output_path(out_dir, rel_out)
+        outputs.extend(
+            output
+            for output in expected_processed_outputs(target, asset_type, meta)
+            if output.path.exists()
+        )
+    return outputs
+
+
 def process_one(
     src: Path,
     target: Path,
     asset_type: str,
     meta: dict[str, Any],
     out_dir: Path,
+    color_config: ColorConfig,
 ) -> list[ProcessedOutput]:
     """Dispatch to the right transform. Returns the files written."""
     with Image.open(src) as opened:
         img = opened.convert("RGBA")
 
     if asset_type == "sprite":
-        return [process_sprite(img, target, meta, out_dir)]
+        return [process_sprite(img, target, meta, out_dir, color_config)]
     if asset_type == "hex-tile":
-        return [process_hex_tile(img, target, meta, out_dir)]
+        return [process_hex_tile(img, target, meta, out_dir, color_config)]
     if asset_type == "icon":
-        return process_icon(img, target, meta, out_dir)
+        return process_icon(img, target, meta, out_dir, color_config)
     if asset_type == "card-face":
-        return [process_card_face(img, target, meta, out_dir)]
+        return [process_card_face(img, target, meta, out_dir, color_config)]
     if asset_type == "chrome":
-        return [process_chrome(img, target, meta, out_dir)]
+        return [process_chrome(img, target, meta, out_dir, color_config)]
     if asset_type == "background":
-        return [process_background(img, target, meta, out_dir)]
-    return [process_passthrough(img, target, meta, out_dir)]
+        return [process_background(img, target, meta, out_dir, color_config)]
+    return [process_passthrough(img, target, meta, out_dir, color_config)]
 
 
 # ---------------------------------------------------------------------------
@@ -303,18 +540,25 @@ def process_sprite(
     target: Path,
     meta: dict[str, Any],
     out_dir: Path,
+    color_config: ColorConfig,
 ) -> ProcessedOutput:
     policy = choose_cutout_policy("sprite", img)
     cut = _rembg(img, policy)
     cropped = _crop_to_content(cut, padding=SPRITE_CONTENT_PADDING_PX)
-    processing = [policy.processing_step(), f"crop-to-content:{SPRITE_CONTENT_PADDING_PX}"]
+    color = apply_color_pipeline(cropped, color_config)
+    processing = [
+        policy.processing_step(),
+        f"crop-to-content:{SPRITE_CONTENT_PADDING_PX}",
+        *color.processing,
+    ]
     _save_processed_png(
-        cropped,
+        color.image,
         target,
         out_dir,
         meta,
         processing=processing,
         variant=None,
+        color=color.diagnostics,
     )
     return ProcessedOutput(target, "sprite", meta, tuple(processing))
 
@@ -324,17 +568,24 @@ def process_hex_tile(
     target: Path,
     meta: dict[str, Any],
     out_dir: Path,
+    color_config: ColorConfig,
 ) -> ProcessedOutput:
     square = _center_square(img)
     masked = _apply_hex_mask(square, feather=HEX_FEATHER_RADIUS_PX)
-    processing = ["center-square", f"hex-mask:{HEX_FEATHER_RADIUS_PX}"]
+    color = apply_color_pipeline(masked, color_config)
+    processing = [
+        "center-square",
+        f"hex-mask:{HEX_FEATHER_RADIUS_PX}",
+        *color.processing,
+    ]
     _save_processed_png(
-        masked,
+        color.image,
         target,
         out_dir,
         meta,
         processing=processing,
         variant=None,
+        color=color.diagnostics,
     )
     return ProcessedOutput(target, "hex-tile", meta, tuple(processing))
 
@@ -344,19 +595,22 @@ def process_icon(
     target: Path,
     meta: dict[str, Any],
     out_dir: Path,
+    color_config: ColorConfig,
 ) -> list[ProcessedOutput]:
     policy = choose_cutout_policy("icon", img)
     cut = _rembg(img, policy)
     cropped = _crop_to_content(cut, padding=ICON_CONTENT_PADDING_PX)
+    color = apply_color_pipeline(cropped, color_config)
 
     outputs: list[ProcessedOutput] = []
     stem = target.stem
     for size in ICON_SIZES:
-        sized = _fit_into_square(cropped, size)
+        sized = _fit_into_square(color.image, size)
         out = target.parent / f"{stem}@{size}.png"
         processing = [
             policy.processing_step(),
             f"crop-to-content:{ICON_CONTENT_PADDING_PX}",
+            *color.processing,
             f"fit-square:{size}",
         ]
         _save_processed_png(
@@ -366,6 +620,7 @@ def process_icon(
             meta,
             processing=processing,
             variant=f"size:{size}",
+            color=color.diagnostics,
         )
         outputs.append(
             ProcessedOutput(
@@ -384,16 +639,19 @@ def process_card_face(
     target: Path,
     meta: dict[str, Any],
     out_dir: Path,
+    color_config: ColorConfig,
 ) -> ProcessedOutput:
     cropped = _crop_to_aspect(img, aspect_w=3, aspect_h=4)
-    processing = ["crop-to-aspect:3:4"]
+    color = apply_color_pipeline(cropped, color_config)
+    processing = ["crop-to-aspect:3:4", *color.processing]
     _save_processed_png(
-        cropped,
+        color.image,
         target,
         out_dir,
         meta,
         processing=processing,
         variant=None,
+        color=color.diagnostics,
     )
     return ProcessedOutput(target, "card-face", meta, tuple(processing))
 
@@ -403,17 +661,20 @@ def process_chrome(
     target: Path,
     meta: dict[str, Any],
     out_dir: Path,
+    color_config: ColorConfig,
 ) -> ProcessedOutput:
     policy = choose_cutout_policy("chrome", img)
     cut = _rembg(img, policy)
-    processing = [policy.processing_step()]
+    color = apply_color_pipeline(cut, color_config)
+    processing = [policy.processing_step(), *color.processing]
     _save_processed_png(
-        cut,
+        color.image,
         target,
         out_dir,
         meta,
         processing=processing,
         variant=None,
+        color=color.diagnostics,
     )
     return ProcessedOutput(target, "chrome", meta, tuple(processing))
 
@@ -423,15 +684,18 @@ def process_background(
     target: Path,
     meta: dict[str, Any],
     out_dir: Path,
+    color_config: ColorConfig,
 ) -> ProcessedOutput:
-    processing = ["png-copy"]
+    color = apply_color_pipeline(img, color_config)
+    processing = ["png-copy", *color.processing]
     _save_processed_png(
-        img,
+        color.image,
         target,
         out_dir,
         meta,
         processing=processing,
         variant=None,
+        color=color.diagnostics,
     )
     return ProcessedOutput(target, "background", meta, tuple(processing))
 
@@ -441,17 +705,270 @@ def process_passthrough(
     target: Path,
     meta: dict[str, Any],
     out_dir: Path,
+    color_config: ColorConfig,
 ) -> ProcessedOutput:
-    processing = ["png-copy"]
+    color = apply_color_pipeline(img, color_config)
+    processing = ["png-copy", *color.processing]
     _save_processed_png(
-        img,
+        color.image,
         target,
         out_dir,
         meta,
         processing=processing,
         variant=None,
+        color=color.diagnostics,
     )
     return ProcessedOutput(target, "passthrough", meta, tuple(processing))
+
+
+# ---------------------------------------------------------------------------
+# Color analysis and correction
+# ---------------------------------------------------------------------------
+
+
+def apply_color_pipeline(img: Image.Image, config: ColorConfig) -> ColorResult:
+    """Analyze color, recover washed-out renders, then optionally blend a LUT."""
+    metrics = analyze_color(img, config)
+    out = img
+    processing: list[str] = []
+    recovery_applied = False
+
+    if config.recovery_mode == "always" or (
+        config.recovery_mode == "auto" and metrics.washed_out
+    ):
+        out = _boost_saturation(out, config.saturation_boost)
+        processing.append(f"color-recovery:saturation:{config.saturation_boost:g}")
+        recovery_applied = True
+
+    lut_applied = False
+    if config.lut is not None and config.lut_strength > 0:
+        out = apply_cube_lut(out, config.lut, config.lut_strength)
+        processing.append(
+            f"lut:{config.lut.path.stem}:strength:{config.lut_strength:g}"
+        )
+        lut_applied = True
+
+    diagnostics = color_diagnostics(
+        metrics,
+        config,
+        recovery_applied=recovery_applied,
+        lut_applied=lut_applied,
+    )
+    return ColorResult(out, tuple(processing), diagnostics)
+
+
+def analyze_color(img: Image.Image, config: ColorConfig) -> ColorMetrics:
+    rgba = np.asarray(img.convert("RGBA"), dtype=np.float32)
+    alpha = rgba[..., 3]
+    visible = alpha > METRIC_ALPHA_THRESHOLD
+    visible_count = int(np.count_nonzero(visible))
+    total_count = int(alpha.size)
+
+    if visible_count == 0 or total_count == 0:
+        return ColorMetrics(
+            visible_coverage=0.0,
+            saturation_mean=0.0,
+            saturation_p90=0.0,
+            luma_stddev=0.0,
+            luma_p95_p05=0.0,
+            washed_out=False,
+        )
+
+    rgb = rgba[..., :3][visible] / 255.0
+    max_channel = np.max(rgb, axis=1)
+    min_channel = np.min(rgb, axis=1)
+    chroma = max_channel - min_channel
+    saturation = np.divide(
+        chroma,
+        max_channel,
+        out=np.zeros_like(chroma),
+        where=max_channel > 0,
+    )
+    luma = (
+        rgb[:, 0] * 0.2126
+        + rgb[:, 1] * 0.7152
+        + rgb[:, 2] * 0.0722
+    )
+
+    saturation_mean = float(np.mean(saturation))
+    saturation_p90 = float(np.percentile(saturation, 90))
+    luma_stddev = float(np.std(luma))
+    luma_p95_p05 = float(np.percentile(luma, 95) - np.percentile(luma, 5))
+    washed_out = (
+        saturation_mean <= config.washed_saturation_threshold
+        and luma_p95_p05 <= config.washed_contrast_threshold
+    )
+
+    return ColorMetrics(
+        visible_coverage=visible_count / total_count,
+        saturation_mean=saturation_mean,
+        saturation_p90=saturation_p90,
+        luma_stddev=luma_stddev,
+        luma_p95_p05=luma_p95_p05,
+        washed_out=washed_out,
+    )
+
+
+def color_diagnostics(
+    metrics: ColorMetrics,
+    config: ColorConfig,
+    *,
+    recovery_applied: bool,
+    lut_applied: bool,
+) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        "visible_coverage": _round_metric(metrics.visible_coverage),
+        "saturation_mean": _round_metric(metrics.saturation_mean),
+        "saturation_p90": _round_metric(metrics.saturation_p90),
+        "luma_stddev": _round_metric(metrics.luma_stddev),
+        "luma_p95_p05": _round_metric(metrics.luma_p95_p05),
+        "washed_out": metrics.washed_out,
+        "recovery_mode": config.recovery_mode,
+        "recovery_applied": recovery_applied,
+        "saturation_boost": config.saturation_boost,
+        "washed_saturation_threshold": config.washed_saturation_threshold,
+        "washed_contrast_threshold": config.washed_contrast_threshold,
+        "lut_applied": lut_applied,
+    }
+    if config.lut is not None:
+        diagnostics["lut"] = config.lut.path.name
+        diagnostics["lut_title"] = config.lut.title
+        diagnostics["lut_strength"] = config.lut_strength
+    return diagnostics
+
+
+def _round_metric(value: float) -> float:
+    return round(float(value), 4)
+
+
+def _boost_saturation(img: Image.Image, factor: float) -> Image.Image:
+    rgba = img.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    rgb = rgba.convert("RGB")
+    boosted = ImageEnhance.Color(rgb).enhance(factor).convert("RGBA")
+    boosted.putalpha(alpha)
+    return boosted
+
+
+def load_cube_lut(path: Path) -> CubeLut:
+    title = path.stem
+    size: int | None = None
+    domain_min = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    domain_max = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+    rows: list[tuple[float, float, float]] = []
+
+    lines = path.read_text(encoding="utf8").splitlines()
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        parts = line.split()
+        key = parts[0].upper()
+        if key == "TITLE":
+            title = line.partition(" ")[2].strip().strip('"') or title
+            continue
+        if key == "LUT_3D_SIZE":
+            if len(parts) != 2:
+                raise ValueError(f"{path}: bad LUT_3D_SIZE on line {line_number}")
+            size = int(parts[1])
+            if size < 2:
+                raise ValueError(f"{path}: LUT_3D_SIZE must be at least 2")
+            continue
+        if key == "DOMAIN_MIN":
+            domain_min = _parse_lut_domain(path, line_number, parts)
+            continue
+        if key == "DOMAIN_MAX":
+            domain_max = _parse_lut_domain(path, line_number, parts)
+            continue
+        if key.startswith("LUT_1D"):
+            raise ValueError(f"{path}: 1D LUTs are not supported")
+
+        if len(parts) < 3:
+            raise ValueError(f"{path}: expected RGB row on line {line_number}")
+        try:
+            rows.append((float(parts[0]), float(parts[1]), float(parts[2])))
+        except ValueError as exc:
+            raise ValueError(
+                f"{path}: expected numeric RGB row on line {line_number}"
+            ) from exc
+
+    if size is None:
+        raise ValueError(f"{path}: missing LUT_3D_SIZE")
+    expected = size**3
+    if len(rows) != expected:
+        raise ValueError(
+            f"{path}: expected {expected} RGB rows for "
+            f"LUT_3D_SIZE {size}, got {len(rows)}"
+        )
+    if np.any(domain_max <= domain_min):
+        raise ValueError(f"{path}: DOMAIN_MAX must be greater than DOMAIN_MIN")
+
+    table = np.asarray(rows, dtype=np.float32).reshape((size, size, size, 3))
+    return CubeLut(
+        path=path,
+        title=title,
+        size=size,
+        table=np.clip(table, 0.0, 1.0),
+        domain_min=domain_min,
+        domain_max=domain_max,
+    )
+
+
+def _parse_lut_domain(path: Path, line_number: int, parts: list[str]) -> np.ndarray:
+    if len(parts) != 4:
+        raise ValueError(f"{path}: bad {parts[0]} on line {line_number}")
+    try:
+        return np.array(
+            [float(parts[1]), float(parts[2]), float(parts[3])],
+            dtype=np.float32,
+        )
+    except ValueError as exc:
+        raise ValueError(f"{path}: bad {parts[0]} on line {line_number}") from exc
+
+
+def apply_cube_lut(img: Image.Image, lut: CubeLut, strength: float) -> Image.Image:
+    rgba = np.asarray(img.convert("RGBA"), dtype=np.float32) / 255.0
+    rgb = rgba[..., :3]
+    domain_span = lut.domain_max - lut.domain_min
+    coords = np.clip((rgb - lut.domain_min) / domain_span, 0.0, 1.0)
+    coords *= lut.size - 1
+
+    low = np.floor(coords).astype(np.int32)
+    high = np.clip(low + 1, 0, lut.size - 1)
+    frac = coords - low
+
+    r0 = low[..., 0]
+    g0 = low[..., 1]
+    b0 = low[..., 2]
+    r1 = high[..., 0]
+    g1 = high[..., 1]
+    b1 = high[..., 2]
+    rf = frac[..., 0][..., None]
+    gf = frac[..., 1][..., None]
+    bf = frac[..., 2][..., None]
+
+    c000 = lut.table[r0, g0, b0]
+    c001 = lut.table[r0, g0, b1]
+    c010 = lut.table[r0, g1, b0]
+    c011 = lut.table[r0, g1, b1]
+    c100 = lut.table[r1, g0, b0]
+    c101 = lut.table[r1, g0, b1]
+    c110 = lut.table[r1, g1, b0]
+    c111 = lut.table[r1, g1, b1]
+
+    c00 = c000 * (1.0 - bf) + c001 * bf
+    c01 = c010 * (1.0 - bf) + c011 * bf
+    c10 = c100 * (1.0 - bf) + c101 * bf
+    c11 = c110 * (1.0 - bf) + c111 * bf
+    c0 = c00 * (1.0 - gf) + c01 * gf
+    c1 = c10 * (1.0 - gf) + c11 * gf
+    graded = c0 * (1.0 - rf) + c1 * rf
+
+    strength = float(strength)
+    rgba[..., :3] = rgb * (1.0 - strength) + graded * strength
+    out = np.clip(rgba * 255.0, 0, 255).astype(np.uint8)
+    return Image.fromarray(out)
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +1021,11 @@ def _estimate_border_complexity(img: Image.Image) -> float:
 # ---------------------------------------------------------------------------
 
 
-def build_atlases(out_dir: Path, outputs: list[ProcessedOutput]) -> list[Path]:
+def build_atlases(
+    out_dir: Path,
+    outputs: list[ProcessedOutput],
+    reprocess: bool,
+) -> list[Path]:
     groups: dict[tuple[str, str, str | None], list[ProcessedOutput]] = {}
     for output in outputs:
         if output.asset_type not in {"sprite", "icon"}:
@@ -526,6 +1047,8 @@ def build_atlases(out_dir: Path, outputs: list[ProcessedOutput]) -> list[Path]:
                 sheet_index=index,
                 sheet_count=len(sheets),
             )
+            if not reprocess and (atlas_path.exists() or manifest_path.exists()):
+                continue
             atlas_path.parent.mkdir(parents=True, exist_ok=True)
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -700,12 +1223,14 @@ def _save_processed_png(
     *,
     processing: list[str],
     variant: str | None,
+    color: dict[str, Any],
 ) -> None:
     metadata = build_png_provenance(
         meta,
         output_file=target.relative_to(out_dir).as_posix(),
         processing=processing,
         variant=variant,
+        color=color,
     )
     save_png_with_metadata(img, target, metadata)
 
@@ -729,6 +1254,7 @@ def build_png_provenance(
     output_file: str,
     processing: list[str],
     variant: str | None,
+    color: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema": "illuminator/provenance@1",
@@ -759,6 +1285,8 @@ def build_png_provenance(
         payload["formatted_prompt_sha256"] = _sha256_json(meta["formatted_prompt"])
     if isinstance(meta.get("prompt_fragment"), str):
         payload["prompt_fragment_sha256"] = _sha256_text(meta["prompt_fragment"])
+    if color is not None:
+        payload["color"] = color
 
     return {key: value for key, value in payload.items() if value not in (None, [], "")}
 

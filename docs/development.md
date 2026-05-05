@@ -62,12 +62,14 @@ illuminator/
 
 - `src/parse-pack.ts`: parses `pack.toml`, resolves prompt files, named
   styles, named palettes, and type prompt fragments
-- `src/generate.ts`: orchestrates pack loading, Claude formatting, BFL
+- `src/generate.ts`: orchestrates pack loading, Claude formatting, image
   generation, raw PNG metadata embedding, and sidecar writes
 - `src/png-metadata.ts`: embeds provenance metadata in generated PNGs
 - `src/claude-formatter.ts`: builds the Claude prompt template and parses the
-  Flux 2 JSON response
+  selected model's formatted prompt response
 - `src/bfl-client.ts`: submits, polls, and downloads images from BFL
+- `src/openai-image-client.ts`: calls OpenAI image generation for GPT Image
+  and DALL-E models
 - `post/process.py`: post-processes raw PNG outputs by asset type, embeds
   processed PNG metadata, and builds sprite/icon atlases
 

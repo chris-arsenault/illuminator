@@ -25,6 +25,20 @@ test("cli accepts --concurrency during dry-run", () => {
   assert.match(result.stdout, /Finished: 5 succeeded, 0 failed/);
 });
 
+test("cli accepts OpenAI image models during dry-run", () => {
+  const result = spawnSync(
+    process.execPath,
+    [cliPath, "generate", packPath, "--dry-run", "--model", "gpt-image-1.5"],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Finished: 5 succeeded, 0 failed/);
+});
+
 test("generate defaults to missing raw assets and --reprocess regenerates selected assets", async () => {
   const outDir = await mkdtemp(join(tmpdir(), "illuminator-out-"));
   const existingRaw = join(outDir, "raw", "sprites", "owl.png");
@@ -149,6 +163,7 @@ test("generate no-ops without API keys when all selected raw assets exist", asyn
         ANTHROPIC_API_KEY: "",
         BFL_API_KEY: "",
         CLAUDE_API_KEY: "",
+        OPENAI_API_KEY: "",
       },
     },
   );

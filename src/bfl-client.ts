@@ -1,12 +1,13 @@
-import type { FluxJsonPrompt } from "./types.js";
+import type { FormattedImagePrompt } from "./types.js";
 import {
+  getImageProvider,
   validateAspectRatio,
   validateModelId,
   validateRenderSize,
 } from "./validation.js";
 
 /**
- * BFL (Black Forest Labs) Flux 2 image generation client.
+ * BFL (Black Forest Labs) image generation client.
  *
  * Adapted from apps/illuminator/webui/src/lib/imageClient.bfl.ts in the
  * canonry repo. We call api.bfl.ai directly (Node — no CORS), so the relay
@@ -63,7 +64,7 @@ export interface BflOptions {
 }
 
 export interface BflRequest {
-  prompt: FluxJsonPrompt;
+  prompt: FormattedImagePrompt;
   size?: string;     // e.g. "1024x1024"
   aspect?: string;   // e.g. "1:1" — only used on ultra models
 }
@@ -84,6 +85,9 @@ export class BflClient {
   constructor(opts: BflOptions) {
     this.apiKey = opts.apiKey;
     this.model = validateModelId(opts.model ?? "flux-2-pro", "BFL model");
+    if (getImageProvider(this.model) !== "bfl") {
+      throw new Error(`BFL model must be a BFL model: ${this.model}`);
+    }
   }
 
   async generate(request: BflRequest): Promise<BflResult> {
@@ -203,12 +207,15 @@ function resolveEndpoint(model: string): string {
   return model;
 }
 
-function buildRequestBody(
+export function buildRequestBody(
   model: string,
   request: BflRequest,
 ): Record<string, unknown> {
   const size = validateRenderSize(request.size ?? "1024x1024", "render size");
-  const prompt = JSON.stringify(request.prompt);
+  const prompt =
+    typeof request.prompt === "string"
+      ? request.prompt
+      : JSON.stringify(request.prompt);
 
   const body: Record<string, unknown> = {
     prompt,

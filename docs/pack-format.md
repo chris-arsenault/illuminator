@@ -66,9 +66,11 @@ Supported top-level keys:
 - `model`
 - `default_style`
 - `default_palette`
+- `default_identity`
 - `defaults`
 - `style`
 - `palette`
+- `identity`
 - `type_prompt_fragment`
 - `section`
 
@@ -92,7 +94,8 @@ Unknown keys are rejected.
 - `aspect`
 
 If `default_style` or `default_palette` are omitted, they fall back to the
-preset's own base ids.
+preset's own base ids. `default_identity` is optional and has no preset-level
+fallback — packs without cultural grounding leave it unset.
 
 ## Styles and palettes
 
@@ -116,6 +119,47 @@ Palette fields:
 - `secondary`
 - `notes`
 
+## Identities
+
+Use `[identity.<id>]` to define named subject identities — canonical
+descriptions of a cultural, factional, or species grounding that applies to a
+subset of assets. An asset's resolved identity is spliced into Claude's user
+message alongside the prompt, so every asset in the same identity reads as
+from the same world without the identity text being copy-pasted into each
+prompt file.
+
+Identity fields:
+
+- `name` — human-facing label
+- `description` — the canonical vocabulary itself (required, must be non-empty)
+
+Keep descriptions under roughly 150 words each. Identity text shares the
+user message with the asset prompt and the type fragment; verbosity crowds
+out useful detail and pushes Claude toward truncation.
+
+Example:
+
+```toml
+[identity.aurora-stack]
+name = "Aurora Stack"
+description = """
+Penguins of the sunlit vertical crystalline spire colony. Regalia: pale
+ice-plate armor, aurora-crystal coronets, flowing white robes over
+segmented silvered plate. Magic: aurora-light — cool prismatic shimmer at
+crystal edges, slow, meditative. Architecture: spires, prismatic lenses,
+tiered ceremonial halls.
+"""
+
+[identity.orca]
+name = "Orca"
+description = """
+Ritual-scarred wake-singers of the Corpse Current. No clothing — carved
+resonance-chambers on the flanks, hunt-liturgy scars across the snout.
+The Dreaming Tooth when relevant. Blue-black hide, ivory scar-lines,
+faint gravitational haze when pressure-magic is invoked.
+"""
+```
+
 ## Sections
 
 Each `[[section]]` supports:
@@ -124,6 +168,7 @@ Each `[[section]]` supports:
 - `title`
 - `style`
 - `palette`
+- `identity`
 - `asset`
 
 `id` is required. `title` defaults to the section id if omitted.
@@ -139,6 +184,7 @@ Each `[[section.asset]]` supports:
 - `size`
 - `style`
 - `palette`
+- `identity`
 - `prompt`
 - `prompt_inline`
 
@@ -149,12 +195,12 @@ Asset ids use lowercase kebab-case.
 
 ## Resolution order
 
-Style and palette ids resolve in this order:
+Style, palette, and identity ids all resolve with the same chain:
 
-1. asset-level `style` or `palette`
-2. section-level `style` or `palette`
-3. top-level `default_style` or `default_palette`
-4. preset base ids
+1. asset-level
+2. section-level
+3. top-level default
+4. for style/palette: preset base id; for identity: null (no identity applied)
 
 ## Type prompt fragments
 
@@ -180,7 +226,8 @@ This text is appended after the built-in type-specific guidance.
 - each dimension must be a multiple of `16`.
 - `aspect` must be `W:H` with positive integers.
 - supported models are `flux-2-pro`, `flux-2-max`,
-  `flux-pro-1.1-ultra`, and `flux-pro-1.1-ultra-raw`.
+  `flux-pro-1.1-ultra`, `flux-pro-1.1-ultra-raw`,
+  `gpt-image-1.5`, `gpt-image-1`, `dall-e-3`, and `dall-e-2`.
 
 ## Output metadata
 

@@ -207,6 +207,164 @@ A valid description.
   );
 });
 
+test("loadPack leaves identity_id null when no identities are defined", async () => {
+  const root = await createPack({
+    "pack.toml": `preset = "glacial-archive"
+
+[[section]]
+id = "sprites"
+
+[[section.asset]]
+id = "penguin"
+file = "sprites/penguin.png"
+prompt_inline = """
+A valid description.
+"""
+`,
+  });
+
+  const doc = await loadPack(root);
+  assert.equal(doc.specs[0].identity_id, null);
+  assert.deepEqual(doc.identities, {});
+  assert.equal(doc.settings.default_identity, null);
+});
+
+test("loadPack resolves identity inheritance: asset > section > default", async () => {
+  const root = await createPack({
+    "pack.toml": `preset = "glacial-archive"
+default_identity = "aurora-stack"
+
+[identity.aurora-stack]
+name = "Aurora Stack"
+description = "Pale ice-plate penguins of the crystalline spires."
+
+[identity.nightshelf]
+name = "Nightshelf"
+description = "Charcoal-wrapped tunnel penguins with ember-thread regalia."
+
+[identity.orca]
+name = "Orca"
+description = "Ritual-scarred wake-singers of the Corpse Current."
+
+[[section]]
+id = "aurora"
+
+[[section.asset]]
+id = "aurora-general"
+file = "sprites/aurora-general.png"
+prompt_inline = """
+An Aurora general.
+"""
+
+[[section]]
+id = "nightshelf"
+identity = "nightshelf"
+
+[[section.asset]]
+id = "nightshelf-broker"
+file = "sprites/nightshelf-broker.png"
+prompt_inline = """
+A Nightshelf broker.
+"""
+
+[[section.asset]]
+id = "orca-singer"
+file = "sprites/orca-singer.png"
+identity = "orca"
+prompt_inline = """
+An orca wake-singer.
+"""
+`,
+  });
+
+  const doc = await loadPack(root);
+  const byId = Object.fromEntries(doc.specs.map((s) => [s.id, s]));
+
+  // Pack default: aurora-stack
+  assert.equal(byId["aurora-general"].identity_id, "aurora-stack");
+  // Section override: nightshelf
+  assert.equal(byId["nightshelf-broker"].identity_id, "nightshelf");
+  // Asset override: orca (wins over section)
+  assert.equal(byId["orca-singer"].identity_id, "orca");
+  assert.equal(doc.identities["aurora-stack"].name, "Aurora Stack");
+});
+
+test("loadPack rejects unknown identity references", async () => {
+  const root = await createPack({
+    "pack.toml": `preset = "glacial-archive"
+
+[identity.aurora-stack]
+description = "Pale ice-plate penguins."
+
+[[section]]
+id = "sprites"
+identity = "missing-identity"
+
+[[section.asset]]
+id = "penguin"
+file = "sprites/penguin.png"
+prompt_inline = """
+A valid description.
+"""
+`,
+  });
+
+  await assert.rejects(
+    () => loadPack(root),
+    /unknown identity "missing-identity"/i,
+  );
+});
+
+test("loadPack rejects default_identity pointing at missing identity", async () => {
+  const root = await createPack({
+    "pack.toml": `preset = "glacial-archive"
+default_identity = "ghost"
+
+[[section]]
+id = "sprites"
+
+[[section.asset]]
+id = "penguin"
+file = "sprites/penguin.png"
+prompt_inline = """
+A valid description.
+"""
+`,
+  });
+
+  await assert.rejects(
+    () => loadPack(root),
+    /unknown identity "ghost"/i,
+  );
+});
+
+test("loadPack requires identity description text", async () => {
+  const root = await createPack({
+    "pack.toml": `preset = "glacial-archive"
+
+[identity.empty-one]
+name = "Nothing"
+description = ""
+
+[[section]]
+id = "sprites"
+
+[[section.asset]]
+id = "penguin"
+file = "sprites/penguin.png"
+identity = "empty-one"
+prompt_inline = """
+A valid description.
+"""
+`,
+  });
+
+  await assert.rejects(
+    () => loadPack(root),
+    /pack\.identity\.empty-one\.description/i,
+  );
+});
+
 test("loadPack rejects unknown style references", async () => {
   const root = await createPack({
     "pack.toml": `preset = "glacial-archive"

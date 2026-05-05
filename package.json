@@ -1,7 +1,7 @@
 {
   "name": "illuminator",
   "version": "0.1.0",
-  "description": "CLI for generating cohesive illustration batches from a TOML pack, powered by BFL Flux 2 + Claude prompt formatting.",
+  "description": "CLI for generating cohesive illustration batches from a TOML pack, powered by image models + Claude prompt formatting.",
   "type": "module",
   "bin": {
     "illuminator": "./dist/cli.js"

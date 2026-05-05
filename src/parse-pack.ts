@@ -7,6 +7,7 @@ import type {
   AssetSpec,
   AssetType,
   DocSettings,
+  Identity,
   Palette,
   StyleAnchor,
 } from "./types.js";
@@ -68,6 +69,11 @@ interface PaletteDefinition {
   notes?: string;
 }
 
+interface IdentityDefinition {
+  name?: string;
+  description?: string;
+}
+
 export async function loadPack(inputPath: string): Promise<AssetDoc> {
   const packPath = await resolvePackPath(inputPath);
   const packDir = dirname(packPath);
@@ -90,9 +96,11 @@ export async function loadPack(inputPath: string): Promise<AssetDoc> {
       "model",
       "default_style",
       "default_palette",
+      "default_identity",
       "defaults",
       "style",
       "palette",
+      "identity",
       "type_prompt_fragment",
       "section",
     ]),
@@ -107,11 +115,15 @@ export async function loadPack(inputPath: string): Promise<AssetDoc> {
 
   const styles = parseStyleRegistry(root.style, preset.style);
   const palettes = parsePaletteRegistry(root.palette, preset.palette);
+  const identities = parseIdentityRegistry(root.identity);
   const settings = parseSettings(root, preset.style.id, preset.palette.id);
   const typePromptFragments = parseTypePromptFragments(root.type_prompt_fragment);
 
   assertKnownStyleId(settings.default_style, styles, "pack.default_style");
   assertKnownPaletteId(settings.default_palette, palettes, "pack.default_palette");
+  if (settings.default_identity !== null) {
+    assertKnownIdentityId(settings.default_identity, identities, "pack.default_identity");
+  }
 
   const specs = await parseSections(
     root.section,
@@ -119,12 +131,13 @@ export async function loadPack(inputPath: string): Promise<AssetDoc> {
       settings,
       styles,
       palettes,
+      identities,
       typePromptFragments,
       packDir,
     },
   );
 
-  return { packDir, settings, styles, palettes, specs };
+  return { packDir, settings, styles, palettes, identities, specs };
 }
 
 async function resolvePackPath(inputPath: string): Promise<string> {
@@ -180,6 +193,15 @@ function parseSettings(
       readOptionalString(root.default_palette, "pack.default_palette") ?? fallbackPaletteId,
       "pack.default_palette",
     ),
+    // Identity has no preset-level fallback — packs without cultural
+    // grounding leave this null and Claude formatting skips the identity
+    // splice entirely.
+    default_identity: root.default_identity === undefined
+      ? null
+      : validateIdentifier(
+          readString(root.default_identity, "pack.default_identity"),
+          "pack.default_identity",
+        ),
     default_size: validateRenderSize(
       readOptionalString(defaultsRaw.size, "pack.defaults.size") ?? "1024x1024",
       "pack.defaults.size",
@@ -279,6 +301,44 @@ function parsePaletteDefinition(
   };
 }
 
+function parseIdentityRegistry(
+  rawIdentities: unknown,
+): Record<string, Identity> {
+  const registry: Record<string, Identity> = {};
+  if (rawIdentities === undefined) return registry;
+
+  const identityTable = asTable(rawIdentities, "pack.identity");
+  for (const [rawId, rawIdentity] of Object.entries(identityTable)) {
+    const id = validateIdentifier(rawId, `pack.identity.${rawId}`);
+    const definition = parseIdentityDefinition(rawIdentity, `pack.identity.${id}`);
+    registry[id] = {
+      id,
+      name: definition.name ?? id,
+      description: validateNonEmptyText(
+        definition.description ?? "",
+        `pack.identity.${id}.description`,
+      ),
+    };
+  }
+  return registry;
+}
+
+function parseIdentityDefinition(
+  rawIdentity: unknown,
+  context: string,
+): IdentityDefinition {
+  const identity = asTable(rawIdentity, context);
+  assertAllowedKeys(identity, new Set(["name", "description"]), context);
+
+  return {
+    name: readOptionalTrimmedString(identity.name, `${context}.name`),
+    description: readOptionalTrimmedString(
+      identity.description,
+      `${context}.description`,
+    ),
+  };
+}
+
 function parseTypePromptFragments(
   rawFragments: unknown,
 ): Partial<Record<AssetType, string>> {
@@ -307,6 +367,7 @@ async function parseSections(
     settings: DocSettings;
     styles: Record<string, StyleAnchor>;
     palettes: Record<string, Palette>;
+    identities: Record<string, Identity>;
     typePromptFragments: Partial<Record<AssetType, string>>;
     packDir: string;
   },
@@ -323,7 +384,11 @@ async function parseSections(
   for (let i = 0; i < rawSections.length; i++) {
     const context = `pack.section[${i}]`;
     const section = asTable(rawSections[i], context);
-    assertAllowedKeys(section, new Set(["id", "title", "style", "palette", "asset"]), context);
+    assertAllowedKeys(
+      section,
+      new Set(["id", "title", "style", "palette", "identity", "asset"]),
+      context,
+    );
 
     const sectionId = validateIdentifier(
       readString(required(section, "id", context), `${context}.id`),
@@ -348,6 +413,12 @@ async function parseSections(
       opts.palettes,
       `${context}.palette`,
     );
+    const sectionIdentityId = resolveIdentityId(
+      readOptionalString(section.identity, `${context}.identity`),
+      opts.settings.default_identity,
+      opts.identities,
+      `${context}.identity`,
+    );
 
     if (!Array.isArray(section.asset) || section.asset.length === 0) {
       throw new Error(
@@ -362,9 +433,11 @@ async function parseSections(
         sectionTitle,
         defaultStyleId: sectionStyleId,
         defaultPaletteId: sectionPaletteId,
+        defaultIdentityId: sectionIdentityId,
         settings: opts.settings,
         styles: opts.styles,
         palettes: opts.palettes,
+        identities: opts.identities,
         packDir: opts.packDir,
         typePromptFragments: opts.typePromptFragments,
       });
@@ -391,9 +464,11 @@ async function parseAsset(
     sectionTitle: string;
     defaultStyleId: string;
     defaultPaletteId: string;
+    defaultIdentityId: string | null;
     settings: DocSettings;
     styles: Record<string, StyleAnchor>;
     palettes: Record<string, Palette>;
+    identities: Record<string, Identity>;
     packDir: string;
     typePromptFragments: Partial<Record<AssetType, string>>;
   },
@@ -409,6 +484,7 @@ async function parseAsset(
       "size",
       "style",
       "palette",
+      "identity",
       "prompt",
       "prompt_inline",
     ]),
@@ -442,6 +518,12 @@ async function parseAsset(
     opts.palettes,
     `${opts.context}.palette`,
   );
+  const identityId = resolveIdentityId(
+    readOptionalString(asset.identity, `${opts.context}.identity`),
+    opts.defaultIdentityId,
+    opts.identities,
+    `${opts.context}.identity`,
+  );
   const description = await loadPromptText(asset, opts.context, opts.packDir);
   const promptFragment = buildTypePromptFragment(type, opts.typePromptFragments[type]);
 
@@ -452,6 +534,7 @@ async function parseAsset(
     section: opts.sectionTitle,
     style_id: styleId,
     palette_id: paletteId,
+    identity_id: identityId,
     type,
     prompt_fragment: promptFragment,
     aspect: validateAspectRatio(
@@ -587,6 +670,43 @@ function assertKnownPaletteId(
   if (!(id in palettes)) {
     throw new Error(
       `${context} references unknown palette "${id}". Available: ${Object.keys(palettes).join(", ")}.`,
+    );
+  }
+}
+
+/**
+ * Resolve an identity reference with the inheritance chain:
+ * asset-level > section-level (fallback) > null.
+ *
+ * Identity is the one resolved field that can legitimately be null — packs
+ * without cultural grounding for their subjects (e.g. UI chrome or purely
+ * decorative packs) skip it entirely.
+ */
+function resolveIdentityId(
+  rawId: string | undefined,
+  fallbackId: string | null,
+  identities: Record<string, Identity>,
+  context: string,
+): string | null {
+  const effective = rawId ?? fallbackId;
+  if (effective === null || effective === undefined) return null;
+  const id = validateIdentifier(effective, context);
+  assertKnownIdentityId(id, identities, context);
+  return id;
+}
+
+function assertKnownIdentityId(
+  id: string,
+  identities: Record<string, Identity>,
+  context: string,
+): void {
+  if (!(id in identities)) {
+    const available = Object.keys(identities);
+    const availableMsg = available.length === 0
+      ? "no identities defined"
+      : `Available: ${available.join(", ")}`;
+    throw new Error(
+      `${context} references unknown identity "${id}". ${availableMsg}.`,
     );
   }
 }

@@ -144,6 +144,54 @@ given type.
 Type fragments only affect prompt synthesis. The downstream post-processing
 policy for each asset type remains automatic and code-defined.
 
+## Named identities
+
+Identities are a separate axis from styles and palettes. They capture the
+canonical **vocabulary of a subject's cultural / factional / species
+grounding**: armor, weapons, regalia, architecture, magical register — the
+world-specific nouns.
+
+Declare them under `[identity.<id>]`:
+
+```toml
+[identity.aurora-stack]
+name = "Aurora Stack"
+description = """
+Penguins of the sunlit vertical crystalline spire colony. Regalia: pale
+ice-plate, aurora-crystal coronets, flowing white robes over segmented
+silvered plate. Magic: aurora-light — cool prismatic shimmer at crystal
+edges. Architecture: spires, prismatic lenses, tiered ceremonial halls.
+"""
+
+[identity.nightshelf]
+name = "Nightshelf"
+description = """
+Penguins of the underground tunnel labyrinth. Regalia: charcoal wraps
+with ember-thread embroidery, hooded robes, bone-and-volcanic-glass masks.
+Magic: captured fire — warm ember glow, detonation. Architecture: tunnel
+warrens, fire-core braziers, bioluminescent ice glyphs.
+"""
+```
+
+Apply them at any level of the resolution chain (asset > section > pack
+default), the same way styles and palettes work:
+
+```toml
+default_identity = "aurora-stack"  # pack-wide default
+
+[[section]]
+id = "nightshelf-assets"
+identity = "nightshelf"             # section override
+
+[[section.asset]]
+id = "orca-leader"
+identity = "orca"                   # asset override (wins)
+```
+
+Keep identity descriptions **under ~150 words**. Identity text lands in
+Claude's user message alongside the asset prompt and the type fragment;
+verbose identities crowd out useful detail and push Claude toward truncation.
+
 ## When to use what
 
 Use:
@@ -151,11 +199,16 @@ Use:
 - a preset for the broad project baseline
 - a named style when composition or rendering treatment changes across groups
 - a named palette when color language changes across groups
+- a named identity when subjects' cultural / factional vocabulary differs
+  and you want ONE canonical source instead of copy-pasting the vocab into
+  every prompt
 - a type fragment when every asset of one asset type needs shared guidance
-- the asset prompt for the actual subject matter
+- the asset prompt for the actual subject-matter (the specific pose,
+  action, composition — the things unique to this one asset)
 
-Do not repeat pack-wide style or palette instructions inside every prompt.
-That duplication is exactly what the manifest layer is meant to remove.
+Do not repeat pack-wide style, palette, or identity instructions inside
+every prompt. That duplication is exactly what the manifest layer is meant
+to remove — and what drifts when you hand-edit it.
 
 ## Adding a new preset in code
 

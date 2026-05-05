@@ -19,6 +19,10 @@ raw/
 out/
 assets/
 
+# Local third-party LUT downloads. These may be free/CC-licensed, but keep
+# payloads out of this repo so users fetch their own copies from source.
+third_party/luts/
+
 # Editor
 .vscode/
 .idea/
