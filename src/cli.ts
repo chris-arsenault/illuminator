@@ -24,8 +24,13 @@ generate options:
                         <out>/raw, processed assets to <out>/processed.
                         Defaults to <pack-dir>/output.
   --section <name>      Only generate assets whose section id/title matches
+  --asset <id[,id…]>    Only generate these asset ids (comma-separated, exact
+                        match against AssetSpec.id). Combines with --section
+                        and bypasses --limit's round-robin.
   --limit <n>           Limit to N assets — picks round-robin across sections
   --smoke-test          Alias for --limit 3
+  --reprocess           Regenerate selected assets even when raw PNGs already
+                        exist. By default, only missing raw assets are run.
   --dry-run             Parse + validate only, skip Claude and BFL
   --preview             Print formatted Flux 2 JSON to stdout, skip everything else
   --model <id>          Override model from pack (e.g. flux-2-pro, flux-2-max)
@@ -83,8 +88,9 @@ async function runGenerate(args: string[]): Promise<void> {
     "preview",
     "smoke-test",
     "and-process",
+    "reprocess",
   ]);
-  const valueFlags = new Set(["out", "section", "limit", "model", "concurrency"]);
+  const valueFlags = new Set(["out", "section", "asset", "limit", "model", "concurrency"]);
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -147,30 +153,18 @@ async function runGenerate(args: string[]): Promise<void> {
     ? validateModelId(flags.get("model")!, "--model")
     : undefined;
 
-  if (!previewOnly && !dryRun && !bflApiKey) {
-    console.error(
-      "error: BFL_API_KEY is not set. Export it or use --dry-run / --preview.",
-    );
-    process.exit(2);
-  }
-  // Claude is only needed when we actually call it: --preview and real runs.
-  if (!dryRun && !anthropicApiKey) {
-    console.error(
-      "error: ANTHROPIC_API_KEY is not set. Claude formatting is required.",
-    );
-    process.exit(2);
-  }
-
   const summary = await generate({
     packPath,
     outDir,
     section: flags.get("section"),
+    asset: flags.get("asset"),
     limit,
     dryRun,
     previewOnly,
     modelOverride,
     concurrency,
     andProcess: bools.has("and-process"),
+    reprocess: bools.has("reprocess"),
     anthropicApiKey,
     bflApiKey,
     onProgress: logProgress,
@@ -188,6 +182,11 @@ async function runGenerate(args: string[]): Promise<void> {
   }
 
   console.log("");
+  if (summary.skippedExisting > 0) {
+    console.log(
+      `Skipped ${summary.skippedExisting} existing raw asset(s); use --reprocess to regenerate.`,
+    );
+  }
   console.log(`Finished: ${summary.successes.length} succeeded, ${summary.failures.length} failed`);
   console.log(`Total cost: $${summary.total_cost_usd.toFixed(4)}`);
   console.log(`Duration: ${(summary.duration_ms / 1000).toFixed(1)}s`);

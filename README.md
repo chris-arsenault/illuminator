@@ -56,4 +56,8 @@ Raw Flux outputs land at `examples/field-kit/output/raw/`, post-processed
 assets at `examples/field-kit/output/processed/`. Override with `--out /some/dir`
 if you want them elsewhere.
 
+Generation is incremental by default: existing raw PNGs are skipped, and only
+missing `pack.toml` assets are generated. Use `--reprocess` to regenerate the
+selected assets anyway.
+
 If you want details, start with the [Usage Guide](docs/usage.md).

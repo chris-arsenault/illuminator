@@ -51,6 +51,11 @@ Output goes to `<pack-dir>/output/` by default — raw Flux PNGs land under
 `<pack-dir>/output/processed/` (when `--and-process` is on). Use `--out` only
 when you want outputs somewhere other than next to the pack.
 
+Generation is incremental by default: Illuminator scans the raw output
+directory and only runs pack assets whose raw PNG is missing. Add
+`--reprocess` to regenerate the selected assets even if their raw PNGs already
+exist.
+
 Generate the whole pack (output at `examples/field-kit/output/raw/`):
 
 ```bash
@@ -73,6 +78,12 @@ Generate one section by matching its id or title:
 
 ```bash
 node dist/cli.js generate examples/field-kit --section icons
+```
+
+Regenerate every asset in a section, including raw PNGs that already exist:
+
+```bash
+node dist/cli.js generate examples/field-kit --section icons --reprocess
 ```
 
 Limit the run:

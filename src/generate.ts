@@ -1,5 +1,5 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { BflClient } from "./bfl-client.js";
@@ -28,8 +28,17 @@ export interface GenerateOptions {
   outDir?: string;
   /** Filter to this section name (case-insensitive substring match). */
   section?: string;
+  /**
+   * Filter to one or more asset ids (case-insensitive exact match against
+   * AssetSpec.id). Comma-separated string or string array. When combined
+   * with `section`, the intersection is used. Skips `limit`'s round-robin
+   * when asset ids are explicit.
+   */
+  asset?: string | readonly string[];
   /** Limit to at most N assets (smoke test). Picks one-per-section when possible. */
   limit?: number;
+  /** Regenerate selected assets even when their raw output PNG already exists. */
+  reprocess?: boolean;
   /** Skip API calls — print what would happen. */
   dryRun?: boolean;
   /** Only print formatted Claude outputs; no BFL calls, no disk writes. */
@@ -93,6 +102,8 @@ export interface GenerateSummary {
     exit_code: number;
     duration_ms: number;
   };
+  /** Selected pack assets skipped because their raw PNG already exists. */
+  skippedExisting: number;
 }
 
 export async function generate(
@@ -108,12 +119,28 @@ export async function generate(
   const rawDir = resolve(outRoot, "raw");
   const processedDir = resolve(outRoot, "processed");
 
-  const filtered = filterSpecs(doc.specs, opts.section, opts.limit);
+  const { specs: filtered, skippedExisting } = await filterSpecs(
+    doc.specs,
+    opts.section,
+    opts.asset,
+    opts.limit,
+    {
+      rawDir,
+      reprocess: opts.reprocess === true,
+    },
+  );
   const concurrency = parseBoundedIntegerFlag(
     String(opts.concurrency ?? 1),
     "concurrency",
     { min: 1, max: MAX_CONCURRENCY },
   );
+  validateCredentialsForSelectedRun({
+    selectedCount: filtered.length,
+    dryRun: opts.dryRun === true,
+    previewOnly: opts.previewOnly === true,
+    anthropicApiKey: opts.anthropicApiKey,
+    bflApiKey: opts.bflApiKey,
+  });
 
   opts.onProgress?.({ kind: "start", total: filtered.length });
 
@@ -125,10 +152,13 @@ export async function generate(
   // Claude formatter instances are cached per style/palette pair so prompt
   // caching can still kick in when assets share the same resolved context.
   const formatterCache = new Map<string, ClaudeFormatter>();
-  const bfl = new BflClient({
-    apiKey: opts.bflApiKey,
-    model,
-  });
+  const bfl =
+    filtered.length === 0 || opts.dryRun || opts.previewOnly
+      ? undefined
+      : new BflClient({
+          apiKey: opts.bflApiKey,
+          model,
+        });
 
   let nextIndex = 0;
   const processOne = async (spec: AssetSpec, index: number): Promise<void> => {
@@ -192,6 +222,9 @@ export async function generate(
         total: filtered.length,
       });
 
+      if (!bfl) {
+        throw new Error("BFL client was not initialized.");
+      }
       const bflResult = await bfl.generate({
         prompt: fmt.prompt,
         size: spec.size,
@@ -307,6 +340,7 @@ export async function generate(
     // otherwise the summary would promise an output that doesn't exist.
     processedDir: postProcess ? processedDir : undefined,
     postProcess,
+    skippedExisting,
   };
 }
 
@@ -334,11 +368,13 @@ async function runPostProcessor(
   return { exit_code: exitCode, duration_ms: Date.now() - started };
 }
 
-function filterSpecs(
+async function filterSpecs(
   specs: AssetSpec[],
   section: string | undefined,
+  asset: string | readonly string[] | undefined,
   limit: number | undefined,
-): AssetSpec[] {
+  existingFilter: { rawDir: string; reprocess: boolean },
+): Promise<{ specs: AssetSpec[]; skippedExisting: number }> {
   let filtered = specs;
   if (section) {
     const needle = section.toLowerCase();
@@ -347,11 +383,87 @@ function filterSpecs(
       s.section_id.toLowerCase().includes(needle),
     );
   }
-  if (limit !== undefined && limit > 0 && limit < filtered.length) {
+
+  let hasAssetFilter = false;
+  if (asset) {
+    hasAssetFilter = true;
+    const ids = new Set(
+      (Array.isArray(asset) ? asset : String(asset).split(","))
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => s.length > 0),
+    );
+    filtered = filtered.filter((s) => ids.has(s.id.toLowerCase()));
+  }
+
+  let skippedExisting = 0;
+  if (!existingFilter.reprocess) {
+    const existing = await listRawOutputFiles(existingFilter.rawDir);
+    const before = filtered.length;
+    filtered = filtered.filter((s) => !existing.has(s.file));
+    skippedExisting = before - filtered.length;
+  }
+
+  if (
+    !hasAssetFilter &&
+    limit !== undefined &&
+    limit > 0 &&
+    limit < filtered.length
+  ) {
     // Pick one per section where possible, then fill up.
     filtered = pickSampleAcrossSections(filtered, limit);
   }
-  return filtered;
+  return { specs: filtered, skippedExisting };
+}
+
+async function listRawOutputFiles(rawDir: string): Promise<Set<string>> {
+  const files = new Set<string>();
+
+  const walk = async (dir: string, prefix: string): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true }).catch((err) => {
+      if (isNodeError(err) && err.code === "ENOENT") return [];
+      throw err;
+    });
+
+    for (const entry of entries) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const absolutePath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(absolutePath, relativePath);
+      } else if (entry.isFile()) {
+        files.add(relativePath);
+      }
+    }
+  };
+
+  await walk(rawDir, "");
+  return files;
+}
+
+function isNodeError(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && "code" in err;
+}
+
+function validateCredentialsForSelectedRun(args: {
+  selectedCount: number;
+  dryRun: boolean;
+  previewOnly: boolean;
+  anthropicApiKey: string;
+  bflApiKey: string;
+}): void {
+  if (args.selectedCount === 0 || args.dryRun) return;
+
+  if (!args.anthropicApiKey) {
+    throw new Error(
+      "error: ANTHROPIC_API_KEY is not set. Claude formatting is required.",
+    );
+  }
+  if (args.previewOnly) return;
+
+  if (!args.bflApiKey) {
+    throw new Error(
+      "error: BFL_API_KEY is not set. Export it or use --dry-run / --preview.",
+    );
+  }
 }
 
 function pickSampleAcrossSections(
