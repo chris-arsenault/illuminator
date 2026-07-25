@@ -10,6 +10,7 @@ applies the appropriate transform:
   card-face   -> crop to aspect, no background removal
   chrome      -> automatic rembg cutout, keep native resolution
   background  -> copy as PNG with embedded provenance metadata
+  mask        -> single-channel grayscale, center square, range-normalized
   passthrough -> copy as PNG with embedded provenance metadata
 
 For `sprite` and `icon` outputs, the processor also builds deterministic atlas
@@ -70,8 +71,12 @@ VALID_ASSET_TYPES = {
     "card-face",
     "chrome",
     "background",
+    "mask",
     "passthrough",
 }
+# Masks are spatial-control material, not pictures. They are consumed as distance fields and
+# gradients, so the boundary must stay clean and the range must span 0..255.
+MASK_SIDE_PX = 1024
 _REMBG_SESSIONS: dict[str, Any] = {}
 
 
@@ -430,6 +435,8 @@ def infer_type_from_path(file: str) -> str:
         return "chrome"
     if lower.startswith("backgrounds/") or lower.startswith("bg/"):
         return "background"
+    if lower.startswith("masks/") or lower.startswith("mask/"):
+        return "mask"
     return "passthrough"
 
 
@@ -527,6 +534,8 @@ def process_one(
         return [process_chrome(img, target, meta, out_dir, color_config)]
     if asset_type == "background":
         return [process_background(img, target, meta, out_dir, color_config)]
+    if asset_type == "mask":
+        return [process_mask(img, target, meta, out_dir)]
     return [process_passthrough(img, target, meta, out_dir, color_config)]
 
 
@@ -677,6 +686,57 @@ def process_chrome(
         color=color.diagnostics,
     )
     return ProcessedOutput(target, "chrome", meta, tuple(processing))
+
+
+def process_mask(
+    img: Image.Image,
+    target: Path,
+    meta: dict[str, Any],
+    out_dir: Path,
+) -> ProcessedOutput:
+    """Grayscale, square, range-normalized single-channel mask.
+
+    Deliberately skips the colour pipeline. Saturation boost and LUT grading exist to make pictures
+    look better; applied to a mask they would distort the very values a distance field is derived
+    from.
+
+    Alpha is composited onto black so transparency reads as outside the mask, matching the white
+    shape on a black field the mask prompt asks for. Flattening onto white would invert that meaning
+    for any generation that happens to carry alpha.
+    """
+    flattened = _flatten_onto_black(img)
+    square = _center_square(flattened)
+    resized = square.resize((MASK_SIDE_PX, MASK_SIDE_PX), Image.Resampling.LANCZOS)
+    grayscale = resized.convert("L")
+    # Normalizes to the full 0..255 range, so a low-contrast generation still yields a usable mask.
+    normalized = ImageOps.autocontrast(grayscale, cutoff=1)
+
+    processing = [
+        "flatten-black",
+        "center-square",
+        f"resize:{MASK_SIDE_PX}",
+        "grayscale",
+        "autocontrast:1",
+    ]
+    _save_processed_png(
+        normalized,
+        target,
+        out_dir,
+        meta,
+        processing=processing,
+        variant=None,
+        color={"pipeline": "skipped-for-mask"},
+    )
+    return ProcessedOutput(target, "mask", meta, tuple(processing))
+
+
+def _flatten_onto_black(img: Image.Image) -> Image.Image:
+    """Composites any alpha onto black, so transparency reads as outside the mask."""
+    if img.mode != "RGBA":
+        return img.convert("RGB")
+
+    background = Image.new("RGBA", img.size, (0, 0, 0, 255))
+    return Image.alpha_composite(background, img).convert("RGB")
 
 
 def process_background(

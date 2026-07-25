@@ -31,6 +31,7 @@ const VALID_TYPES: ReadonlySet<AssetType> = new Set([
   "card-face",
   "chrome",
   "background",
+  "mask",
   "passthrough",
 ]);
 
@@ -47,6 +48,8 @@ const BUILTIN_TYPE_PROMPT_FRAGMENTS: Record<AssetType, string> = {
     "This asset is UI chrome or ornamentation. Keep it decorative, controlled, and cleanly cuttable from the background.",
   background:
     "This asset is a background or texture. Prioritize atmosphere and surface coherence over a single isolated subject.",
+  mask:
+    "This asset is a grayscale spatial mask, not a picture. Render it as a single bold shape in pure white on a pure black field, centered and filling most of the frame. Use no color, no texture, no shading, no gradients inside the shape, and no background detail. Keep the boundary clean and continuous, because it will be converted into a distance field.",
   passthrough:
     "This asset should remain straightforward and production-friendly, with composition that survives direct downstream use.",
 };

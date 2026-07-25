@@ -251,4 +251,10 @@ manifests beside them.
 | `card-face` | crop to 3:4, no background removal |
 | `chrome` | automatic rembg cutout policy, keep native resolution |
 | `background` | no cutout, resize only |
+| `mask` | flatten onto white, center square, 1024px, grayscale, range-normalized; colour pipeline skipped |
 | `passthrough` | copy as-is |
+
+A `mask` asset is spatial-control material rather than a picture. It is consumed as a distance field,
+gradient field, or stencil, so the colour pipeline is skipped: saturation boost and LUT grading would
+distort the values those derivations read. Author mask prompts as a single bold white shape on a
+black field.

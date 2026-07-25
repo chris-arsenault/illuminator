@@ -86,6 +86,7 @@ export type AssetType =
   | "card-face"   // crop to 3:4, no background removal
   | "chrome"      // cutout, no resize
   | "background"  // resize only, no cutout
+  | "mask"        // grayscale, center square, range-normalized; no colour pipeline
   | "passthrough"; // copy as-is
 
 /**

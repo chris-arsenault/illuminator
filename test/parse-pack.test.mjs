@@ -387,3 +387,51 @@ A valid description.
     /unknown style "missing-style"/i,
   );
 });
+
+test("loadPack accepts the mask asset type and injects its guidance", async () => {
+  const root = await createPack({
+    "pack.toml": `preset = "glacial-archive"
+
+[[section]]
+id = "masks"
+title = "Spatial masks"
+
+[[section.asset]]
+id = "inkblot"
+file = "masks/inkblot.png"
+type = "mask"
+prompt_inline = """
+A symmetrical inkblot silhouette.
+"""
+`,
+  });
+
+  const doc = await loadPack(root);
+  const asset = doc.specs.find((entry) => entry.id === "inkblot");
+
+  assert.equal(asset.type, "mask");
+  // A mask must be prompted as a shape, not a picture, or the distance field is meaningless.
+  assert.match(asset.prompt_fragment ?? "", /grayscale spatial mask/i);
+  assert.match(asset.prompt_fragment ?? "", /white on a pure black field/i);
+});
+
+test("loadPack infers the mask type from a masks/ output path", async () => {
+  const root = await createPack({
+    "pack.toml": `preset = "glacial-archive"
+
+[[section]]
+id = "masks"
+
+[[section.asset]]
+id = "logo"
+file = "masks/logo.png"
+type = "mask"
+prompt_inline = """
+A bold emblem silhouette.
+"""
+`,
+  });
+
+  const doc = await loadPack(root);
+  assert.equal(doc.specs[0].type, "mask");
+});
